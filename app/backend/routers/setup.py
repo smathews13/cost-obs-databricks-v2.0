@@ -87,6 +87,7 @@ def _restore_task_state() -> None:
             "elapsed_seconds": None,
             "table_progress": saved.get("table_progress", {}),
             "table_errors": saved.get("table_errors") or {},
+            "table_results": saved.get("table_results") or {},
         })
         logger.info("Restored interrupted task state from previous pod session")
     elif status == "error":
@@ -97,6 +98,7 @@ def _restore_task_state() -> None:
             "elapsed_seconds": None,
             "table_progress": saved.get("table_progress", {}),
             "table_errors": saved.get("table_errors") or {},
+            "table_results": saved.get("table_results") or {},
         })
 
 
@@ -162,6 +164,15 @@ def _reconcile_task_state_from_disk() -> None:
         _create_task_state["error"] = disk.get("error")
         _create_task_state["table_progress"] = disk.get("table_progress") or {}
         _create_task_state["table_errors"] = disk.get("table_errors") or {}
+        _create_task_state["table_results"] = disk.get("table_results") or {}
+        _create_task_state["user_grants"] = disk.get("user_grants")
+
+
+# App config/state tables Create Tables bootstraps after the gold tables.
+_SETUP_CONFIG_TABLES = [
+    "app_response_cache", "app_user_permissions",
+    "app_mv_refresh_state", "app_schedule_settings", "app_workspace_filter",
+]
 
 
 # Core billing tables — must exist for the dashboard to be functional.
@@ -716,6 +727,26 @@ async def reset_bootstrap_state() -> dict[str, Any]:
     return {"ok": True, "previous": prev, "current": _create_task_state.copy()}
 
 
+@router.get("/created-tables")
+async def get_created_tables() -> dict[str, Any]:
+    """Which tables Create Tables manages exist in the app schema (UC REST, no warehouse).
+
+    The wizard shows this when no build ran in this session, so its build results
+    (task.table_results) aren't available.
+    """
+    catalog, schema = get_catalog_schema()
+    names = list(_MV_TABLES) + _SETUP_CONFIG_TABLES
+    try:
+        exists = await asyncio.to_thread(check_materialized_views_exist, catalog, schema, names, True)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Could not list the app tables: {_clean_sdk_error(str(e))}")
+    return {
+        "catalog": catalog,
+        "schema": schema,
+        "tables": [{"name": n, "exists": bool(exists.get(n))} for n in names],
+    }
+
+
 @router.get("/bootstrap-state")
 async def get_bootstrap_state() -> dict[str, Any]:
     """Return current in-process bootstrap task state for debugging."""
@@ -956,14 +987,20 @@ def _preflight_catalog_check(catalog: str) -> dict:
         }
 
 
-def _verify_built_objects_as_sp(catalog: str, schema: str) -> dict:
+def _verify_built_objects_as_sp(catalog: str, schema: str, skipped: frozenset[str] = frozenset()) -> dict:
     """Probe every MV table with a one-row read as the SP to confirm UC grants propagated.
+
+    `skipped`: tables the build skipped (optional source not connected, e.g. cloud
+    invoice actuals). They don't exist, so probing them would fail every setup that
+    hasn't connected those sources.
 
     Returns {"ok": bool, "failed": list[str], "errors": dict[str, str]}
     """
     failed: list[str] = []
     errors: dict[str, str] = {}
     for table in _MV_TABLES:
+        if table in skipped:
+            continue
         try:
             _execute_as_sp(f"SELECT 1 FROM `{catalog}`.`{schema}`.`{table}` LIMIT 1")
         except Exception as e:
@@ -997,16 +1034,17 @@ async def create_tables(
 
     if run_in_background:
         import time as _time
+        # Before the state turns 'running': if this stalled or raised after it, no
+        # build would start and every retry would be refused as already in progress.
+        grant_to = await _admin_installer_email(request)
         _create_task_state["status"] = "running"
         _create_task_state["error"] = None
         _create_task_state["started_at"] = _time.monotonic()
         _create_task_state["elapsed_seconds"] = 0
-        _ALL_SETUP_TABLES = _MV_TABLES + [
-            "app_response_cache", "app_user_permissions",
-            "app_mv_refresh_state", "app_schedule_settings", "app_workspace_filter",
-        ]
-        _create_task_state["table_progress"] = {t: "pending" for t in _ALL_SETUP_TABLES}
+        _create_task_state["table_progress"] = {t: "pending" for t in _MV_TABLES + _SETUP_CONFIG_TABLES}
         _create_task_state["table_errors"] = {}
+        _create_task_state["table_results"] = {}
+        _create_task_state["user_grants"] = None
         _persist_task_state()
         # Read the raw header token directly — _auth_mode may have been locked to "sp"
         # (e.g. after a scope error on a previous request), which forces _db_user_token
@@ -1017,7 +1055,8 @@ async def create_tables(
             or _db_user_token.get()
         )
         background_tasks.add_task(
-            _create_tables_task, target_catalog, target_schema, _token_snap
+            _create_tables_task, target_catalog, target_schema, _token_snap,
+            grant_to or "", grant_to is not None,
         )
         return {
             "status": "started",
@@ -1036,7 +1075,9 @@ async def create_tables(
         }
 
 
-def _create_tables_task(catalog: str, schema: str, user_token: str = ""):
+def _create_tables_task(
+    catalog: str, schema: str, user_token: str = "", user_email: str = "", grant_installer: bool = False,
+):
     """Background task: grants → build → verify.
 
     The catalog-existence check is done by the frontend endpoint (user token)
@@ -1048,7 +1089,8 @@ def _create_tables_task(catalog: str, schema: str, user_token: str = ""):
       exist at grant time; re-applying now that it exists is the authoritative fix.
     3s sleep: brief propagation wait between grants and warehouse ops.
     Phase 2 — Build: create_materialized_views runs as SP.
-    Post-grants: Apply schema-level privileges now that the schema exists.
+    Post-grants: Apply schema-level privileges now that the schema exists, and
+      grant the installing user USE + MANAGE on the catalog and schema the SP owns.
     Phase 3 — Verify: one-row probe on every MV table as SP with retry backoff.
       UC grant propagation can take 10-60s; [0,10,20,30]s delays = 60s budget.
     Only marks "done" after Phase 3 passes.
@@ -1127,6 +1169,7 @@ def _create_tables_task(catalog: str, schema: str, user_token: str = ""):
             on_table_error=_on_table_error, stop_on_error=True,
         )
         logger.info(f"Table creation completed: {results}")
+        _create_task_state["table_results"] = _table_results(results)
 
         all_errors = _build_errors(results)
         if all_errors:
@@ -1161,9 +1204,11 @@ def _create_tables_task(catalog: str, schema: str, user_token: str = ""):
                 _create_task_state["table_progress"][_tname] = "running"
                 _fn()
                 _create_task_state["table_progress"][_tname] = "done"
+                _create_task_state["table_results"][_tname] = "ensured"
                 logger.info("%s table ensured during setup", _tname)
             except Exception as _te:
                 _create_task_state["table_progress"][_tname] = "error"
+                _create_task_state["table_results"][_tname] = f"error: {_clean_sdk_error(str(_te))}"
                 logger.warning("Could not bootstrap %s during setup: %s", _tname, _te)
 
         # Post-creation grants — schema now exists so schema-level privileges
@@ -1175,13 +1220,31 @@ def _create_tables_task(catalog: str, schema: str, user_token: str = ""):
             finally:
                 _db_user_token.reset(post_tok)
 
+        # The SP owns what it just built; without these the installer can't browse
+        # or manage the app catalog. Reported to the wizard rather than failing setup.
+        # Admins only (see _admin_installer_email): the grants include MANAGE.
+        if grant_installer:
+            try:
+                _create_task_state["user_grants"] = _grant_user_catalog_visibility(
+                    catalog, schema, user_token, user_email
+                )
+            except Exception as _ge:
+                logger.warning("Installer catalog grants failed: %s", _ge)
+                _create_task_state["user_grants"] = {
+                    "ok": False, "grantee": user_email, "applied": [], "failed": [],
+                    "error": _clean_sdk_error(str(_ge)), "manual_sql": "",
+                }
+
         # Phase 3: Verify with retry backoff for grant propagation.
         retry_delays = [0, 10, 20, 30]
         last_verify: dict = {}
         for delay in retry_delays:
             if delay > 0:
                 _time.sleep(delay)
-            last_verify = _verify_built_objects_as_sp(catalog, schema)
+            last_verify = _verify_built_objects_as_sp(
+                catalog, schema,
+                frozenset(t for t, r in _create_task_state["table_results"].items() if r.startswith("skipped")),
+            )
             logger.info(
                 f"SP verification (delay +{delay}s): ok={last_verify['ok']} "
                 f"failed={last_verify.get('failed', [])}"
@@ -1478,60 +1541,116 @@ async def bootstrap_admin(request: Request) -> dict[str, Any]:
 # ============================================================================
 
 
-def _grant_user_catalog_visibility(
-    catalog: str, schema: str | None, user_token: str
-) -> None:
-    """Best-effort: grant the installing user full visibility + MANAGE on the app catalog/schema.
+def _table_results(results: dict) -> dict[str, str]:
+    """Per-table outcome for the wizard: created / refreshed / skipped... / error...
 
-    Grants:
-      - USE CATALOG + MANAGE ON CATALOG (navigate + re-grant SP on future redeploys)
-      - USE SCHEMA + SELECT ON SCHEMA + MANAGE ON SCHEMA (see tables, read data, manage grants)
-
-    Uses SQL GRANT via the warehouse — NOT the UC REST API — because SP M2M tokens
-    in Databricks Apps lack the unity-catalog OAuth scope required for direct UC API
-    calls (same reason _grant_sp_schema_access uses SQL instead of REST).
-    Fails silently — visibility is convenience, not correctness.
+    The build result also carries "catalog" and "schema" step statuses and
+    "__"-prefixed metadata, which aren't tables.
     """
-    if not user_token:
-        return
+    return {
+        k: v for k, v in results.items()
+        if isinstance(v, str) and not k.startswith("__") and k not in ("catalog", "schema")
+    }
+
+
+async def _admin_installer_email(request: Request) -> str | None:
+    """The caller's email when they may receive catalog grants, else None.
+
+    The grants include MANAGE on the app catalog, so only app admins get them. On a
+    fresh deploy with no admins configured everyone is admin (user._get_user_role),
+    which keeps first-time setup working.
+    """
+    from backend.routers.user import _get_user_role
+    email = request.headers.get("X-Forwarded-Email", "")
+    try:
+        role = await _get_user_role(email)
+    except Exception as e:
+        logger.warning("Skipping catalog grants: could not resolve the caller's role: %s", e)
+        return None
+    if role != "admin":
+        logger.info("Skipping catalog grants for non-admin caller %s", email or "(unknown)")
+        return None
+    return email
+
+
+def _resolve_installer_email(user_token: str, user_email: str = "") -> str:
+    """The installing user's UC principal: the forwarded email, else the token's identity."""
+    if user_email:
+        return user_email
     host = os.getenv("DATABRICKS_HOST", "")
-    if not host:
-        return
+    if not user_token or not host:
+        return ""
     try:
         from databricks.sdk import WorkspaceClient as _WC
-        user_w = _WC(host=host, token=user_token, auth_type="pat")
-        me = user_w.current_user.me()
-        user_email = me.user_name or ""
-        if not user_email:
-            return
-        from backend.db import execute_query as _exec, _user_token as _exec_tok
-        ctx = _exec_tok.set("")  # clear user token → SP M2M auth (has sql scope + owns objects)
-        try:
-            _exec(f"GRANT USE CATALOG ON CATALOG `{catalog}` TO `{user_email}`", no_cache=True)
-            _exec(f"GRANT MANAGE ON CATALOG `{catalog}` TO `{user_email}`", no_cache=True)
-            if schema:
-                _exec(
-                    f"GRANT USE SCHEMA ON SCHEMA `{catalog}`.`{schema}` TO `{user_email}`",
-                    no_cache=True,
-                )
-                _exec(
-                    f"GRANT SELECT ON SCHEMA `{catalog}`.`{schema}` TO `{user_email}`",
-                    no_cache=True,
-                )
-                _exec(
-                    f"GRANT MANAGE ON SCHEMA `{catalog}`.`{schema}` TO `{user_email}`",
-                    no_cache=True,
-                )
-        finally:
-            _exec_tok.reset(ctx)
-        logger.info(
-            f"Granted USE CATALOG + MANAGE ON CATALOG"
-            + (f" + USE SCHEMA + SELECT ON SCHEMA + MANAGE ON SCHEMA" if schema else "")
-            + f" on `{catalog}`" + (f".`{schema}`" if schema else "")
-            + f" to {user_email}"
-        )
+        return _WC(host=host, token=user_token, auth_type="pat").current_user.me().user_name or ""
     except Exception as e:
-        logger.warning(f"Could not grant catalog visibility to installer: {_clean_sdk_error(str(e))}")
+        logger.warning(f"Could not resolve the installing user: {_clean_sdk_error(str(e))}")
+        return ""
+
+
+def _grant_user_catalog_visibility(
+    catalog: str, schema: str | None, user_token: str, user_email: str = ""
+) -> dict:
+    """Grant the installing user USE + MANAGE on the app catalog (and schema).
+
+    The SP creates the catalog/schema/tables, so it owns them and nobody else can
+    see them until it grants access. Grants:
+      - USE CATALOG, USE SCHEMA, MANAGE ON CATALOG (browse every app schema, manage grants)
+      - USE SCHEMA, SELECT, MANAGE ON SCHEMA (read the tables, manage their grants)
+
+    Uses SQL GRANT via the warehouse as the SP — NOT the UC REST API — because SP
+    M2M tokens in Databricks Apps lack the unity-catalog OAuth scope required for
+    direct UC API calls. Each grant runs on its own so one refusal doesn't skip the
+    rest. Returns {"ok", "grantee", "applied", "failed", "manual_sql"}; manual_sql is
+    what a catalog owner can run when a grant didn't land.
+    """
+    grantee = _resolve_installer_email(user_token, user_email)
+    if not grantee or "`" in grantee:  # quoted with backticks below
+        return {"ok": False, "grantee": "", "applied": [], "failed": [],
+                "error": "Could not identify the signed-in user to grant catalog access to.",
+                "manual_sql": ""}
+    stmts = [
+        f"GRANT USE CATALOG ON CATALOG `{catalog}` TO `{grantee}`",
+        f"GRANT USE SCHEMA ON CATALOG `{catalog}` TO `{grantee}`",
+        f"GRANT MANAGE ON CATALOG `{catalog}` TO `{grantee}`",
+    ]
+    if schema:
+        stmts += [
+            f"GRANT USE SCHEMA ON SCHEMA `{catalog}`.`{schema}` TO `{grantee}`",
+            f"GRANT SELECT ON SCHEMA `{catalog}`.`{schema}` TO `{grantee}`",
+            f"GRANT MANAGE ON SCHEMA `{catalog}`.`{schema}` TO `{grantee}`",
+        ]
+    from backend.db import execute_query as _exec, _user_token as _exec_tok
+    applied: list[str] = []
+    failed: list[dict] = []
+    ctx = _exec_tok.set("")  # clear user token → SP M2M auth (has sql scope + owns objects)
+    try:
+        for stmt in stmts:
+            try:
+                _exec(stmt, no_cache=True)
+                applied.append(stmt)
+            except Exception as e:
+                msg = _clean_sdk_error(str(e))
+                if "already" in msg.lower():
+                    applied.append(stmt)
+                else:
+                    failed.append({"sql": stmt, "error": msg})
+    finally:
+        _exec_tok.reset(ctx)
+    if failed:
+        logger.warning(
+            f"Catalog access for {grantee} on `{catalog}`: {len(applied)} granted, "
+            f"{len(failed)} failed — first error: {failed[0]['error']}"
+        )
+    else:
+        logger.info(f"Granted {grantee} USE + MANAGE on `{catalog}`" + (f".`{schema}`" if schema else ""))
+    return {
+        "ok": not failed,
+        "grantee": grantee,
+        "applied": applied,
+        "failed": failed,
+        "manual_sql": ";\n".join(f["sql"] for f in failed) + (";" if failed else ""),
+    }
 
 
 @router.post("/ensure-catalog")
@@ -1548,6 +1667,7 @@ async def ensure_catalog(request: Request) -> dict[str, Any]:
 
     catalog, _ = get_catalog_schema()
     user_token = request.headers.get("x-forwarded-access-token", "")
+    grant_to = await _admin_installer_email(request)
     sp_id = os.getenv("DATABRICKS_CLIENT_ID", "")
 
     if not catalog:
@@ -1666,7 +1786,8 @@ async def ensure_catalog(request: Request) -> dict[str, Any]:
         try:
             w.catalogs.get(catalog)
             logger.info(f"Catalog `{catalog}` verified accessible to SP")
-            _grant_user_catalog_visibility(catalog, None, user_token)
+            if grant_to is not None:
+                _grant_user_catalog_visibility(catalog, None, user_token, grant_to)
             return {"ok": True, "catalog": catalog, "message": f"Catalog `{catalog}` is ready."}
         except Exception as e:
             msg = _clean_sdk_error(str(e))
@@ -1702,6 +1823,7 @@ async def ensure_schema(request: Request) -> dict[str, Any]:
 
     catalog, schema = get_catalog_schema()
     user_token = request.headers.get("x-forwarded-access-token", "")
+    grant_to = await _admin_installer_email(request)
 
     if not catalog or not schema:
         raise HTTPException(status_code=400, detail="No catalog/schema configured.")
@@ -1725,7 +1847,8 @@ async def ensure_schema(request: Request) -> dict[str, Any]:
         try:
             w.schemas.get(f"{catalog}.{schema}")
             logger.info(f"Schema `{catalog}`.`{schema}` verified")
-            _grant_user_catalog_visibility(catalog, schema, user_token)
+            if grant_to is not None:
+                _grant_user_catalog_visibility(catalog, schema, user_token, grant_to)
             return {"ok": True, "schema": f"{catalog}.{schema}",
                     "message": f"Schema `{catalog}.{schema}` is ready."}
         except Exception as e:
@@ -1734,7 +1857,8 @@ async def ensure_schema(request: Request) -> dict[str, Any]:
             if any(kw in lower for kw in ("permission", "privilege", "forbidden", "unauthorized",
                                           "does not have", "access", "insufficient")):
                 logger.info(f"Schema `{catalog}`.`{schema}` exists (SP lacks USE SCHEMA, grants pending)")
-                _grant_user_catalog_visibility(catalog, schema, user_token)
+                if grant_to is not None:
+                    _grant_user_catalog_visibility(catalog, schema, user_token, grant_to)
                 return {"ok": True, "schema": f"{catalog}.{schema}",
                         "message": f"Schema `{catalog}.{schema}` is ready."}
             logger.warning(f"ensure-schema verify failed: {msg}")
@@ -2330,7 +2454,7 @@ async def list_workspaces() -> dict:
     system.access.workspaces_latest, which requires a separate schema grant the SP
     may not hold. That MV is often still building when the wizard reaches this step
     (Create Tables can be skipped and keeps running in the background), so an empty
-    or missing MV falls back to the top-nav filter's list (/api/billing/workspaces).
+    or missing MV falls back to the top-nav filter's list without the pool applied.
     """
     from backend.db import execute_query, get_catalog_schema
     try:
@@ -2367,10 +2491,12 @@ async def list_workspaces() -> dict:
         logger.warning("list-workspaces: daily_workspace_breakdown unavailable (%s) — using the top-nav workspace list", e)
 
     from datetime import date, timedelta
-    from backend.routers.billing import get_workspace_list
-    data = await get_workspace_list(
-        start_date=(date.today() - timedelta(days=365)).isoformat(),
-        end_date=date.today().isoformat(),
+    from backend.routers.billing import workspace_list
+    # Unscoped: the picker must offer workspaces outside the current pool.
+    data = await workspace_list(
+        (date.today() - timedelta(days=365)).isoformat(),
+        date.today().isoformat(),
+        apply_pool=False,
     )
     workspaces = [
         {"id": w["id"], "name": w.get("name") or w["id"], "historical": bool(w.get("historical"))}
@@ -2504,7 +2630,7 @@ def _parse_saved_workspace_ids(row: dict) -> list[str]:
 
 
 def _read_saved_workspace_ids() -> list[str]:
-    """The workspace pool saved in Delta. [] means all workspaces, and is not a lock.
+    """The workspace pool saved in Delta. [] means all workspaces.
 
     Returns [] when the table doesn't exist yet; raises on any other error.
     """
@@ -2520,7 +2646,7 @@ def _read_saved_workspace_ids() -> list[str]:
 
 
 def _write_saved_workspace_ids(ids: list[str]) -> None:
-    """Replace the saved pool. An empty list clears it (all workspaces, unlocked).
+    """Replace the saved pool. An empty list clears it (all workspaces).
 
     Each case is a single statement, so a failed write leaves the previous pool intact
     and concurrent saves can't leave more than one row.
@@ -2544,29 +2670,45 @@ def _write_saved_workspace_ids(ids: list[str]) -> None:
 
 @router.get("/workspace-filter")
 async def get_workspace_filter() -> dict:
-    """Return the current workspace filter and whether it is locked (already configured during setup)."""
+    """Return the saved workspace pool. [] means all workspaces.
+
+    503 when the pool can't be read: the wizard preselects from this, and treating
+    an unreadable pool as "all workspaces" would let a save widen it silently.
+    """
     settings_path = os.path.join(SETTINGS_DIR, "workspace_filter.json")
     import re as _re
-    workspace_ids: list[str] = []
     try:
         with open(settings_path) as f:
             data = json.load(f)
-        workspace_ids = [str(i) for i in data.get("workspace_ids", []) if _re.match(r'^[a-zA-Z0-9_\-\.]+$', str(i))]
+        ids = [str(i) for i in data.get("workspace_ids", []) if _re.match(r'^[a-zA-Z0-9_\-\.]+$', str(i))]
+        return {"workspace_ids": ids}
     except (FileNotFoundError, json.JSONDecodeError):
         pass
 
-    # Locked = Delta holds a non-empty pool (written on first save, survives redeploys)
-    locked = False
+    # The file is missing until startup restores it from Delta (it's wiped on deploy).
     try:
-        saved = await asyncio.to_thread(_read_saved_workspace_ids)
-        if saved:
-            locked = True
-            if not workspace_ids:
-                workspace_ids = saved
+        return {"workspace_ids": await asyncio.to_thread(_read_saved_workspace_ids)}
     except Exception as e:
         logger.warning("workspace-filter: could not read saved pool: %s", e)
+        raise HTTPException(status_code=503, detail=_pool_read_error_detail(e))
 
-    return {"workspace_ids": workspace_ids, "locked": locked}
+
+def _pool_read_error_detail(e: Exception) -> str:
+    """What the wizard shows when the saved pool can't be read.
+
+    Access problems don't clear on retry (e.g. a redeploy's new SP has no grant on
+    the table yet), so name the table and the grant instead of "try again".
+    """
+    msg = _clean_sdk_error(str(e))
+    lower = msg.lower()
+    if any(k in lower for k in ("permission", "insufficient", "does not have", "not authorized", "schema_not_found")):
+        sp = os.getenv("DATABRICKS_CLIENT_ID", "") or "<app service principal>"
+        table = _workspace_filter_table()
+        return (
+            f"The app can't read its saved workspace scope in {table}: {msg} "
+            f"A catalog owner can fix this with: GRANT SELECT, MODIFY ON TABLE {table} TO `{sp}`; then Retry."
+        )
+    return f"Could not read the saved workspace scope: {msg} Try again in a moment."
 
 
 def restore_workspace_filter_from_delta() -> None:
@@ -2597,7 +2739,8 @@ def restore_workspace_filter_from_delta() -> None:
 async def save_workspace_filter(request: Request) -> dict:
     """Persist selected workspace IDs to .settings/workspace_filter.json and Delta. Admin only.
 
-    An empty list means all workspaces: it clears the saved pool and does not lock.
+    An empty list means all workspaces and clears the saved pool. Admins can change
+    the pool at any time; every save replaces the previous one.
     """
     import time as _time
     import re as _re
@@ -2616,23 +2759,6 @@ async def save_workspace_filter(request: Request) -> dict:
     raw_ids: list = body.get("workspace_ids", [])
     valid_ids = [str(i) for i in raw_ids if _re.match(r'^[a-zA-Z0-9_\-\.]+$', str(i))]
     logger.info("save-workspace-filter: validated %d/%d ids (%.1fms)", len(valid_ids), len(raw_ids), (_time.monotonic() - t0) * 1000)
-
-    # Lock check — workspace filter is one-time, set during initial setup only
-    # Fail closed: saving overwrites the table, so an unreadable lock must not be
-    # treated as "unlocked".
-    try:
-        saved = await asyncio.to_thread(_read_saved_workspace_ids)
-    except Exception as e:
-        logger.warning("save-workspace-filter: lock check failed: %s", e)
-        raise HTTPException(
-            status_code=503,
-            detail="Could not check whether the workspace filter is already configured. Try again in a moment.",
-        )
-    if saved:
-        raise HTTPException(
-            status_code=409,
-            detail="Workspace filter is already configured and cannot be changed after initial setup.",
-        )
 
     # Write to file (fast path for running workers)
     settings_path = os.path.join(SETTINGS_DIR, "workspace_filter.json")
@@ -2653,6 +2779,16 @@ async def save_workspace_filter(request: Request) -> dict:
         logger.info("save-workspace-filter: persisted to Delta in %.1fms", (_time.monotonic() - t0) * 1000)
     except Exception as e:
         logger.warning("save-workspace-filter: Delta write failed (non-fatal — file is primary): %s", e)
+
+    # Cache keys carry the pool (workspace_filter.pool_cache_tag), so other workers
+    # stop serving the old scope on their own; this drops this worker's entries and
+    # the shared response cache right away.
+    try:
+        from backend.db import clear_query_cache, delta_cache_invalidate
+        clear_query_cache()
+        await asyncio.to_thread(delta_cache_invalidate)
+    except Exception as e:
+        logger.warning("save-workspace-filter: cache clear failed (non-fatal): %s", e)
 
     return {"saved": valid_ids}
 

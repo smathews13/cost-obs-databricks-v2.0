@@ -1581,12 +1581,18 @@ async def get_workspace_list(
     end_date: str = Query(default=None),
 ) -> dict[str, Any]:
     """All workspaces with billing activity, scoped to COST_OBS_WORKSPACES when set."""
+    return await workspace_list(start_date, end_date, apply_pool=True)
+
+
+async def workspace_list(start_date: str | None, end_date: str | None, *, apply_pool: bool) -> dict[str, Any]:
+    """Workspaces with billing activity. apply_pool=False lists every workspace, so the
+    setup wizard can offer workspaces outside the current pool when rescoping."""
     from backend import workspace_filter as wf
     params = {
         "start_date": start_date or get_default_start_date(),
         "end_date": end_date or get_default_end_date(),
     }
-    configured_ids = wf.get_configured_workspace_ids()
+    configured_ids = wf.get_configured_workspace_ids() if apply_pool else []
     ws_clause = wf.build_ws_filter_clause() if configured_ids else ""
     sql_with_names = f"""
         SELECT
@@ -2801,7 +2807,8 @@ async def get_kpis_bundle(
 
     # Stale-fallback: if billing-backed KPIs are all zero (query failed or warehouse cold),
     # serve the last known-good result so the UI never shows 0s for a healthy account.
-    stale_key = f"{params['start_date']}/{params['end_date']}/{workspace_ids or ''}"
+    from backend.workspace_filter import pool_cache_tag
+    stale_key = f"{params['start_date']}/{params['end_date']}/{workspace_ids or 'pool:' + pool_cache_tag()}"
     billing_has_data = (
         kpis_response.get("total_jobs", 0) > 0
         or kpis_response.get("active_workspaces", 0) > 0

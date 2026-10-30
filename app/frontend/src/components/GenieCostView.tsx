@@ -83,7 +83,7 @@ function SurfaceBreakdownCard({ rows }: { rows: GenieCostSurfaceRow[] }) {
                     <span className="font-medium text-gray-900">{r.surface}</span>
                     {r.surface === "Genie Unknown" && (
                       <span
-                        title="These SKUs pass the Genie inclusion filter but don't match any of the known sub-surface patterns. Open the Diagnostics tab to see the actual SKU strings."
+                        title="This spend passes the Genie inclusion filter but has no known surface. Open the Diagnostics tab to see its surface values and SKUs."
                         className="ml-2 inline-flex rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700"
                       >
                         unmapped
@@ -195,15 +195,21 @@ function GenieSpacesPanel({ inventory }: { inventory?: GenieSpaceInventory }) {
   );
 }
 
-function WorkspaceTable({ rows }: { rows: GenieCostWorkspaceRow[] }) {
+function WorkspaceTable({ rows, workspaceNameMap }: { rows: GenieCostWorkspaceRow[]; workspaceNameMap?: Record<string, string> }) {
   const [search, setSearch] = useState("");
+  // The server falls back to the bare ID when it can't resolve a name; the app-wide
+  // map (the same one the workspace filter uses) usually can.
+  const named = useMemo(() => rows.map((r) => {
+    const resolved = r.workspace_name && r.workspace_name !== r.workspace_id ? r.workspace_name : null;
+    return { ...r, workspace_name: resolved || workspaceNameMap?.[r.workspace_id] || r.workspace_id };
+  }), [rows, workspaceNameMap]);
   const filtered = useMemo(() => {
-    if (!search.trim()) return rows;
+    if (!search.trim()) return named;
     const q = search.toLowerCase();
-    return rows.filter((r) =>
+    return named.filter((r) =>
       r.workspace_name.toLowerCase().includes(q) || r.workspace_id.toLowerCase().includes(q),
     );
-  }, [rows, search]);
+  }, [named, search]);
 
   return (
     <div className="rounded-lg bg-white border p-5" style={{ borderColor: "#E5E5E5" }}>
@@ -290,7 +296,7 @@ function DiagnosticsPanel({ open }: { open: boolean }) {
       <div className="mb-3">
         <h3 className="text-sm font-semibold text-gray-700">Diagnostics — distinct Genie-adjacent billing rows</h3>
         <p className="mt-1 text-xs text-gray-500">
-          Distinct <code className="bg-gray-100 px-1 rounded text-[10px]">(sku_name, usage_type, billing_origin_product)</code> combinations
+          Distinct <code className="bg-gray-100 px-1 rounded text-[10px]">(sku_name, usage_type, billing_origin_product, usage_metadata.genie.surface)</code> combinations
           from the last 90 days of <code className="bg-gray-100 px-1 rounded text-[10px]">system.billing.usage</code> matching
           <code className="ml-1 bg-gray-100 px-1 rounded text-[10px]">%GENIE%</code> or
           <code className="ml-1 bg-gray-100 px-1 rounded text-[10px]">%AI_BI%</code>. Use this to update the
@@ -316,6 +322,7 @@ function DiagnosticsPanel({ open }: { open: boolean }) {
                 <th className="px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">sku_name</th>
                 <th className="px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">usage_type</th>
                 <th className="px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">billing_origin_product</th>
+                <th className="px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">genie.surface</th>
                 <th className="px-3 py-2.5 text-right text-xs font-medium uppercase tracking-wider text-gray-500">Rows</th>
                 <th className="px-3 py-2.5 text-right text-xs font-medium uppercase tracking-wider text-gray-500">Total USD</th>
                 <th className="px-3 py-2.5 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Earliest</th>
@@ -324,10 +331,11 @@ function DiagnosticsPanel({ open }: { open: boolean }) {
             </thead>
             <tbody>
               {data.rows.map((r, i) => (
-                <tr key={`${r.sku_name}-${r.usage_type}-${i}`} className="border-b border-gray-100 last:border-0">
+                <tr key={`${r.sku_name}-${r.usage_type}-${r.genie_surface}-${i}`} className="border-b border-gray-100 last:border-0">
                   <td className="px-3 py-2.5 font-mono text-xs text-gray-900">{r.sku_name || <span className="italic text-gray-500">null</span>}</td>
                   <td className="px-3 py-2.5 font-mono text-xs text-gray-700">{r.usage_type || <span className="italic text-gray-500">null</span>}</td>
                   <td className="px-3 py-2.5 font-mono text-xs text-gray-700">{r.billing_origin_product || <span className="italic text-gray-500">null</span>}</td>
+                  <td className="px-3 py-2.5 font-mono text-xs text-gray-700">{r.genie_surface || <span className="italic text-gray-500">null</span>}</td>
                   <td className="px-3 py-2.5 text-right text-xs text-gray-500">{r.row_count.toLocaleString()}</td>
                   <td className="px-3 py-2.5 text-right text-xs text-gray-700">{formatCurrency(r.total_usd)}</td>
                   <td className="px-3 py-2.5 text-xs text-gray-500">{fmtDateShort(r.earliest_date)}</td>
@@ -486,9 +494,9 @@ export function GenieCostView({ data, isLoading, startDate, endDate, workspaceId
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
                   <strong>Unmapped Genie spend detected.</strong>{" "}
                   {formatCurrency(summary.total_usd__genie_unknown)} of spend matches the Genie inclusion filter
-                  but doesn't fit any of the known sub-surface patterns.
+                  but has no known surface (Genie Code, Genie One or Genie Agents).
                   Open the <button className="underline hover:no-underline" onClick={() => setSubTab("diagnostics")}>Diagnostics</button>{" "}
-                  tab to see the actual <code className="bg-white px-1 rounded text-xs">sku_name</code> strings and update the mapping.
+                  tab to see its <code className="bg-white px-1 rounded text-xs">genie.surface</code> values and SKUs.
                 </div>
               )}
               {summary.other_usage_type_usd > 0 && (
@@ -508,7 +516,7 @@ export function GenieCostView({ data, isLoading, startDate, endDate, workspaceId
         </div>
       )}
 
-      {subTab === "workspaces" && <WorkspaceTable rows={workspaces} />}
+      {subTab === "workspaces" && <WorkspaceTable rows={workspaces} workspaceNameMap={workspaceNameMap} />}
 
       {subTab === "spaces" && <GenieSpacesPanel inventory={inventory} />}
 

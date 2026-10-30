@@ -961,6 +961,17 @@ function Dashboard() {
     ? wsFilterList.filter((workspace) => !workspace.historical).length
     : undefined;
 
+  // An admin can rescope the pool from the setup wizard; drop selections that are
+  // no longer in it so the tabs don't keep asking for workspaces out of scope.
+  useEffect(() => {
+    if (!wsListData?.workspaces?.length) return;
+    const inPool = new Set(wsListData.workspaces.map((w) => w.id));
+    setSelectedWorkspaceIds((ids) => {
+      const kept = ids.filter((id) => inPool.has(id));
+      return kept.length === ids.length ? ids : kept;
+    });
+  }, [wsListData?.workspaces]);
+
   // Service-principal display-name map — refetches after 10 min so if the first
   // SCIM call missed (e.g. permission granted later, backend was in cold-start),
   // consumers recover without a hard refresh.

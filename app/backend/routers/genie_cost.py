@@ -8,13 +8,11 @@ what customers *do* have: `system.billing.usage`, `system.billing.list_prices`,
 and `system.access.workspaces_latest`.
 
 Two dimensions of uncertainty against real customer data:
- 1. **Genie sub-surface detection.** The internal source table has a `surface`
-    column that splits Genie Code / Genie One / Genie Agents. In
-    `system.billing.usage` the equivalent signal is `sku_name`. It's not yet
-    confirmed which distinct SKU strings Databricks emits per sub-surface —
-    the defaults below (`%GENIE_CODE%`, `%GENIE_ONE%`, `%GENIE_AGENT%`)
-    mirror the internal surface names but may need adjustment once we see
-    real customer data.
+ 1. **Genie sub-surface detection.** `system.billing.usage` carries it in
+    `usage_metadata.genie.surface` (GENIE_CODE / GENIE_ONE / GENIE_AGENTS).
+    The SKU is no help: Genie bills as GENIE_FREE_USAGE or
+    ENTERPRISE_SERVERLESS_REAL_TIME_INFERENCE_<region> for every surface.
+    SKU-name patterns remain as a fallback for rows without the field.
  2. **Free-tier attribution.** Customers don't have a direct `free_tier_usd`
     column. Approximated from `usage_type`: `BILLABLE` → charged, everything
     else (`NON_BILLABLE`, `RELATED`, promotional variants) → free-tier.
@@ -83,21 +81,33 @@ _GENIE_INCLUSION_WHERE = (
     "OR u.sku_name ILIKE '%GENIE%' OR u.sku_name ILIKE '%AI_BI_GENIE%')"
 )
 
-# Genie sub-surface classification — provisional heuristic per V2.1_SPEC §5.1.
-# The `ELSE 'unknown'` bucket is intentional: any SKU that passes the Genie
-# inclusion filter but doesn't match one of the three known patterns still
-# contributes to `total_usd` and `charged_usd__genie_unknown` — never dropped
-# silently. If `charged_usd__genie_unknown > 0` in a customer deploy, the
-# Diagnostics endpoint reveals the SKU strings that need to be added to the
-# CASE mapping.
-_SURFACE_CASE_SQL = """
+# The surface field on a billing row. Read through to_json so a workspace whose
+# usage_metadata struct predates the `genie` field gets NULL instead of failing
+# analysis of the whole query.
+GENIE_SURFACE_FIELD_SQL = "get_json_object(to_json({alias}usage_metadata), '$.genie.surface')"
+
+# Genie sub-surface classification. `usage_metadata.genie.surface` is the real
+# signal (validated against billing on 2026-10-30: GENIE_CODE, GENIE_ONE and
+# GENIE_AGENTS, with the same SKUs across all three). The SKU-name patterns are a
+# fallback for rows that don't carry the field.
+# The `ELSE 'unknown'` bucket is intentional: any row that passes the Genie
+# inclusion filter but matches neither still contributes to `total_usd` and
+# `charged_usd__genie_unknown` — never dropped silently. The Diagnostics endpoint
+# shows the surface values and SKUs behind any unknown spend.
+def genie_surface_case_sql(surface: str, sku: str) -> str:
+    """CASE mapping a row to genie_code / genie_one / genie_agents / unknown."""
+    return f"""
     CASE
-        WHEN sku_name ILIKE '%GENIE_CODE%'   THEN 'genie_code'
-        WHEN sku_name ILIKE '%GENIE_ONE%'    THEN 'genie_one'
-        WHEN sku_name ILIKE '%GENIE_AGENTS%' THEN 'genie_agents'
+        WHEN {surface} = 'GENIE_CODE'   OR {sku} ILIKE '%GENIE_CODE%'   THEN 'genie_code'
+        WHEN {surface} = 'GENIE_ONE'    OR {sku} ILIKE '%GENIE_ONE%'    THEN 'genie_one'
+        WHEN {surface} = 'GENIE_AGENTS' OR {sku} ILIKE '%GENIE_AGENTS%' THEN 'genie_agents'
         ELSE 'unknown'
     END
 """
+
+
+# Over the genie_usage CTEs below, which project the surface field as genie_surface_raw.
+_SURFACE_CASE_SQL = genie_surface_case_sql("genie_surface_raw", "sku_name")
 
 # Free-tier attribution per V2.1_SPEC §5.2 convention, refined after validating
 # against real billing (Diagnostics endpoint): Genie serverless inference bills as
@@ -133,6 +143,7 @@ WITH genie_usage AS (
         u.workspace_id,
         u.sku_name,
         u.usage_type,
+        {GENIE_SURFACE_FIELD_SQL.format(alias="u.")} AS genie_surface_raw,
         u.usage_quantity * COALESCE(p.pricing.default, 0) AS spend
     FROM system.billing.usage u
     LEFT JOIN system.billing.list_prices p
@@ -214,6 +225,7 @@ WITH genie_usage AS (
         u.workspace_id,
         u.sku_name,
         u.usage_type,
+        {GENIE_SURFACE_FIELD_SQL.format(alias="u.")} AS genie_surface_raw,
         u.usage_quantity * COALESCE(p.pricing.default, 0) AS spend
     FROM system.billing.usage u
     LEFT JOIN system.billing.list_prices p
@@ -243,11 +255,12 @@ ORDER BY usage_date
 # combos actually present in the customer's data so field engineers can
 # validate the sub-surface + free-tier mappings. Returned by the
 # /diagnostics endpoint.
-_GENIE_DIAGNOSTICS_SQL = """
+_GENIE_DIAGNOSTICS_SQL = f"""
 SELECT
     u.sku_name,
     u.usage_type,
     u.billing_origin_product,
+    {GENIE_SURFACE_FIELD_SQL.format(alias="u.")} AS genie_surface,
     COUNT(*) AS row_count,
     SUM(u.usage_quantity * COALESCE(p.pricing.default, 0)) AS total_usd,
     MIN(u.usage_date) AS earliest_date,
@@ -264,7 +277,7 @@ WHERE u.usage_date >= DATE_SUB(CURRENT_DATE(), 90)
      OR u.billing_origin_product ILIKE '%GENIE%'
      OR u.billing_origin_product ILIKE '%AI_BI%'
   )
-GROUP BY u.sku_name, u.usage_type, u.billing_origin_product
+GROUP BY ALL
 ORDER BY total_usd DESC
 LIMIT 100
 """
@@ -416,11 +429,23 @@ def get_genie_dashboard_bundle(
 
     dbx_total = float((dbx_total_rows[0] if dbx_total_rows else {}).get("databricks_total_usd") or 0.0)
 
-    # Resolve workspace names (best-effort; system.access.workspaces_latest may
-    # not be granted in every deployment).
+    # Resolve workspace names (best-effort). The account workspace list (cached
+    # 1h, shared with the top-nav filter) works on every read path;
+    # system.access.workspaces_latest fills gaps where the warehouse is used and
+    # may not be granted in every deployment.
     ws_name_map: dict[str, str] = {}
     from backend.lakebase_read import warehouse_view_fallback
-    if ws_rows and warehouse_view_fallback():
+    from backend.routers.settings import workspace_names_enabled
+    show_names = workspace_names_enabled()
+    if ws_rows and show_names:
+        try:
+            from backend.routers.billing import _get_account_workspace_names
+            ws_name_map.update(_get_account_workspace_names())
+        except Exception as e:
+            logger.debug("account workspace names unavailable (non-fatal): %s", e)
+    if ws_rows and show_names and warehouse_view_fallback() and any(
+        str(r.get("workspace_id") or "") not in ws_name_map for r in ws_rows
+    ):
         try:
             name_rows = execute_query(
                 "SELECT workspace_id, workspace_name FROM system.access.workspaces_latest",
@@ -430,7 +455,7 @@ def get_genie_dashboard_bundle(
                 wid = r.get("workspace_id")
                 wname = r.get("workspace_name")
                 if wid and wname:
-                    ws_name_map[str(wid)] = str(wname)
+                    ws_name_map.setdefault(str(wid), str(wname))
         except Exception as e:
             logger.debug("workspace name resolution failed (non-fatal): %s", e)
 
@@ -523,10 +548,9 @@ def get_genie_dashboard_bundle(
             "free_tier_usd": agg["free_tier_usd__genie_agents"],
         },
     ]
-    # "Genie Unknown" — Genie-inclusion-filter matches that don't hit any of
-    # the three known sub-surface patterns. Non-zero means the SKU mapping is
-    # out of date; run the Diagnostics endpoint to see the actual sku_name
-    # strings and update _SURFACE_CASE_SQL.
+    # "Genie Unknown" — Genie-inclusion-filter matches with no known surface.
+    # Non-zero means the mapping is out of date; the Diagnostics endpoint shows
+    # the surface values and SKUs to add to genie_surface_case_sql.
     if (agg["total_usd__genie_unknown"] > 0
             or agg["charged_usd__genie_unknown"] > 0
             or agg["free_tier_usd__genie_unknown"] > 0):
@@ -556,22 +580,26 @@ def get_genie_dashboard_bundle(
         "timeseries": timeseries,
         "surface_breakdown": surface_breakdown,
     })
-    try:
-        delta_cache_put(dkey, "genie:dashboard-bundle", payload, ttl_seconds=cache_ttls.AIML_BUNDLE)
-    except Exception as e:
-        logger.debug("Delta cache write failed for genie bundle: %s", e)
+    # An empty result is cheap to recompute and is what a read returns while the
+    # Lakebase copy of daily_sku_breakdown is being reloaded; caching it would
+    # show "No Genie spend" for the whole TTL after the reload finishes.
+    if ws_rows:
+        try:
+            delta_cache_put(dkey, "genie:dashboard-bundle", payload, ttl_seconds=cache_ttls.AIML_BUNDLE)
+        except Exception as e:
+            logger.debug("Delta cache write failed for genie bundle: %s", e)
     return payload
 
 
 @router.get("/diagnostics")
 def get_genie_diagnostics() -> dict[str, Any]:
-    """Dump the distinct (sku_name, usage_type, billing_origin_product) combinations
-    that pass the Genie inclusion filter, so field engineers can validate the
-    sub-surface + free-tier CASE mappings against real customer data.
+    """Dump the distinct (sku_name, usage_type, billing_origin_product, genie_surface)
+    combinations that pass the Genie inclusion filter, so field engineers can
+    validate the sub-surface + free-tier CASE mappings against real customer data.
 
     Look for:
-      - Distinct SKU strings for Genie Code / Genie One / Genie Agents. If they
-        don't match the default ILIKE patterns, update `_SURFACE_CASE_SQL`.
+      - genie_surface values other than GENIE_CODE / GENIE_ONE / GENIE_AGENTS.
+        Add them to `genie_surface_case_sql`.
       - Distinct `usage_type` values. If any promotional/free-tier variant
         exists beyond `NON_BILLABLE` and `RELATED`, add it to
         `_CHARGE_CLASS_CASE_SQL`.
@@ -589,6 +617,7 @@ def get_genie_diagnostics() -> dict[str, Any]:
                 "sku_name": r.get("sku_name"),
                 "usage_type": r.get("usage_type"),
                 "billing_origin_product": r.get("billing_origin_product"),
+                "genie_surface": r.get("genie_surface"),
                 "row_count": int(r.get("row_count") or 0),
                 "total_usd": float(r.get("total_usd") or 0.0),
                 "earliest_date": str(r.get("earliest_date")) if r.get("earliest_date") else None,
@@ -597,7 +626,7 @@ def get_genie_diagnostics() -> dict[str, Any]:
             for r in (rows or [])
         ],
         "note": (
-            "This dump surfaces distinct SKU / usage_type / billing_origin_product "
+            "This dump surfaces distinct SKU / usage_type / billing_origin_product / genie_surface "
             "combinations for any row matching 'GENIE' or 'AI_BI' in sku_name or "
             "billing_origin_product over the last 90 days. Use it to validate the "
             "sub-surface and free-tier mappings in genie_cost.py."

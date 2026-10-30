@@ -670,6 +670,8 @@ export interface GenieCostDiagnosticsRow {
   sku_name: string;
   usage_type: string;
   billing_origin_product: string;
+  /** usage_metadata.genie.surface — GENIE_CODE / GENIE_ONE / GENIE_AGENTS. */
+  genie_surface?: string | null;
   row_count: number;
   total_usd: number;
   earliest_date: string | null;

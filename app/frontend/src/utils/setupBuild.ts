@@ -1,8 +1,21 @@
+/** USE + MANAGE grants Create Tables gives the installing user on the app catalog. */
+export interface SetupUserGrants {
+  ok: boolean;
+  grantee: string;
+  applied: string[];
+  failed: { sql: string; error: string }[];
+  error?: string;
+  manual_sql: string;
+}
+
 export interface SetupBuildTask {
   status: string;
   error: string | null;
   table_progress?: Record<string, string>;
   table_errors?: Record<string, string>;
+  /** Build outcome per table: created / refreshed / skipped… / ensured / error… */
+  table_results?: Record<string, string>;
+  user_grants?: SetupUserGrants | null;
 }
 
 export type SetupBuildOutcome =

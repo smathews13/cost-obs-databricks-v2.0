@@ -1549,6 +1549,48 @@ def _dedup_delta_table(catalog: str, schema: str, table_name: str, pk_cols: list
         return 0
 
 
+_DEFINITION_VERSION_PROP = "cost_obs.definition_version"
+
+
+def _definition_outdated(catalog: str, schema: str, table_name: str, cfg: dict) -> bool:
+    """True when the table was built from an older version of its SQL.
+
+    Tables whose classification changes set `definition_version` in their refresh
+    config. The incremental MERGE only rewrites its reprocess window, so older
+    rows would keep the old classification (and sit beside the new keys in the
+    window). An outdated table takes the full-rebuild path once instead.
+    """
+    want = cfg.get("definition_version")
+    if not want:
+        return False
+    try:
+        rows = execute_query(
+            f"SHOW TBLPROPERTIES `{catalog}`.`{schema}`.`{table_name}` ('{_DEFINITION_VERSION_PROP}')",
+            no_cache=True,
+        )
+    except Exception as e:
+        # Missing table etc. — the normal paths already handle it.
+        logger.debug("definition version check for %s skipped: %s", table_name, e)
+        return False
+    # An unset property comes back as a "does not have property" message, not an error.
+    have = str((rows[0].get("value") if rows else "") or "")
+    return have != str(want)
+
+
+def _stamp_definition_version(catalog: str, schema: str, table_name: str, cfg: dict) -> None:
+    want = cfg.get("definition_version")
+    if not want:
+        return
+    try:
+        execute_query(
+            f"ALTER TABLE `{catalog}`.`{schema}`.`{table_name}` "
+            f"SET TBLPROPERTIES ('{_DEFINITION_VERSION_PROP}' = '{want}')",
+            no_cache=True,
+        )
+    except Exception as e:
+        logger.warning("Could not record definition version on %s (it will rebuild again): %s", table_name, e)
+
+
 @contextmanager
 def _mv_write_guard():
     """Serialize ALL MV create/refresh writers — in-process (threading.Lock) and
@@ -1605,7 +1647,10 @@ def create_materialized_views(catalog: str | None = None, schema: str | None = N
         ):
             try:
                 from backend.lakebase_sync import sync_all_aggregates
-                sync_summary = sync_all_aggregates(catalog, schema, full=force_full_rebuild)
+                # A rebuilt table can differ outside the incremental window (e.g. a
+                # definition_version bump), so its whole Lakebase copy is rewritten.
+                rebuilt = {t for t, v in result.items() if v == "created"} if isinstance(result, dict) else set()
+                sync_summary = sync_all_aggregates(catalog, schema, full=force_full_rebuild, full_tables=rebuilt)
                 if isinstance(result, dict):
                     result["lakebase_sync"] = sync_summary
             except Exception as e:
@@ -1856,7 +1901,11 @@ def _create_materialized_views_impl(catalog: str | None = None, schema: str | No
                 except Exception:
                     pass  # no table yet — fall through to full CREATE
 
-            if not force_full_rebuild and state and state.get("watermark"):
+            outdated = bool(state) and _definition_outdated(catalog, schema, table_name, cfg)
+            if outdated:
+                logger.info(f"{table_name}: built from an older definition — full rebuild")
+
+            if not force_full_rebuild and not outdated and state and state.get("watermark"):
                 # Incremental path: MERGE reprocess window
                 reprocess_days = cfg.get("reprocess_days", 14)
                 overlap_days = cfg.get("overlap_days", 0)
@@ -1908,6 +1957,7 @@ def _create_materialized_views_impl(catalog: str | None = None, schema: str | No
 
             # Full rebuild path (bootstrap or fallback)
             execute_query(create_sql.format(catalog=catalog, schema=schema, billing_lookback_days=lookback_days), no_cache=True)
+            _stamp_definition_version(catalog, schema, table_name, cfg)
             _update_refresh_state(catalog, schema, table_name, 1)
             elapsed = _time.monotonic() - t0
             logger.info(f"✓ {table_name} full rebuild done in {elapsed:.1f}s")
@@ -2092,8 +2142,11 @@ def drop_unified_views(catalog: str | None = None, schema: str | None = None) ->
             logger.debug("drop unified view %s failed (non-fatal): %s", t, e)
 
 
-def check_materialized_views_exist(catalog: str | None = None, schema: str | None = None) -> dict:
-    """Check which materialized view tables exist.
+def check_materialized_views_exist(catalog: str | None = None, schema: str | None = None, table_names: list[str] | None = None, raise_on_failure: bool = False) -> dict:
+    """Check which materialized view tables (or the given table_names) exist.
+
+    raise_on_failure: raise when the listing itself fails, instead of reporting
+    every table as missing.
 
     Uses the Unity Catalog REST API (no SQL warehouse required) so this is
     fast even when the warehouse is cold/starting. Avoids the thread-exhaustion
@@ -2107,7 +2160,7 @@ def check_materialized_views_exist(catalog: str | None = None, schema: str | Non
         catalog = catalog or cat
         schema = schema or sch
 
-    table_names = _MV_TABLES
+    table_names = table_names or _MV_TABLES
 
     # Use the Unity Catalog REST API (no SQL warehouse needed — fast even when cold).
     # Databricks Apps creates a new SP on every redeploy, so the SP may have no grants
@@ -2126,6 +2179,7 @@ def check_materialized_views_exist(catalog: str | None = None, schema: str | Non
         pass
     clients_to_try.append(("sp", get_workspace_client()))
 
+    last_error: Exception | None = None
     for label, w in clients_to_try:
         try:
             existing: set[str] = set()
@@ -2134,9 +2188,12 @@ def check_materialized_views_exist(catalog: str | None = None, schema: str | Non
                     existing.add(t.name.lower())
             return {name: name.lower() in existing for name in table_names}
         except Exception as e:
+            last_error = e
             logger.debug(f"UC tables.list failed ({label} token): {e}")
 
     # Both clients failed — schema/catalog likely doesn't exist yet on this fresh deploy.
+    if raise_on_failure:
+        raise RuntimeError(f"could not list tables in {catalog}.{schema}: {last_error}")
     return {name: False for name in table_names}
 
 

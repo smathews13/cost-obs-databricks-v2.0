@@ -1033,8 +1033,11 @@ def bundle_cache_key(endpoint: str, start_date: str, end_date: str, workspace_id
     Includes the active source-label selection so the data-source filter actually
     changes the cached result — without it, every filter selection hashed to the
     same key and the cached combined (all-sources) bundle was served regardless.
+    With no explicit workspace_ids the saved pool scopes the query, so it is part
+    of the key too.
     """
-    ws_part = ",".join(sorted(workspace_ids)) if workspace_ids else ""
+    from backend.workspace_filter import pool_cache_tag
+    ws_part = ",".join(sorted(workspace_ids)) if workspace_ids else f"pool:{pool_cache_tag()}"
     labels = sorted(str(x) for x in _source_labels.get() if str(x).strip())
     src_part = ",".join(labels)
     raw = f"{endpoint}:{start_date}:{end_date}:{ws_part}:{src_part}"

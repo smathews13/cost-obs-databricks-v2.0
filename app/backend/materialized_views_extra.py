@@ -8,6 +8,10 @@ from backend.materialized_views_remaining import remaining_tables
 
 _REM_CREATE, _REM_MERGE, _REM_REFRESH = remaining_tables()
 
+# genie_surface reads usage_metadata.genie.surface (same mapping as
+# routers/genie_cost.genie_surface_case_sql); every Genie surface bills under the
+# same SKUs, so the SKU patterns are only a fallback. Bump definition_version in
+# EXTRA_TABLE_REFRESH when this changes: the MERGE window can't reclassify history.
 CREATE_DAILY_SKU_BREAKDOWN = """
 CREATE OR REPLACE TABLE `{catalog}`.`{schema}`.`daily_sku_breakdown` CLUSTER BY (usage_date, workspace_id) AS
 SELECT
@@ -31,9 +35,9 @@ SELECT
   CASE
     WHEN u.billing_origin_product = 'GENIE' OR u.sku_name ILIKE '%GENIE%' OR u.sku_name ILIKE '%AI_BI_GENIE%' THEN
       CASE
-        WHEN u.sku_name ILIKE '%GENIE_CODE%' THEN 'genie_code'
-        WHEN u.sku_name ILIKE '%GENIE_ONE%' THEN 'genie_one'
-        WHEN u.sku_name ILIKE '%GENIE_AGENTS%' THEN 'genie_agents'
+        WHEN get_json_object(to_json(u.usage_metadata), '$.genie.surface') = 'GENIE_CODE' OR u.sku_name ILIKE '%GENIE_CODE%' THEN 'genie_code'
+        WHEN get_json_object(to_json(u.usage_metadata), '$.genie.surface') = 'GENIE_ONE' OR u.sku_name ILIKE '%GENIE_ONE%' THEN 'genie_one'
+        WHEN get_json_object(to_json(u.usage_metadata), '$.genie.surface') = 'GENIE_AGENTS' OR u.sku_name ILIKE '%GENIE_AGENTS%' THEN 'genie_agents'
         ELSE 'unknown'
       END
     ELSE NULL
@@ -77,9 +81,9 @@ USING (
     CASE
       WHEN u.billing_origin_product = 'GENIE' OR u.sku_name ILIKE '%GENIE%' OR u.sku_name ILIKE '%AI_BI_GENIE%' THEN
         CASE
-          WHEN u.sku_name ILIKE '%GENIE_CODE%' THEN 'genie_code'
-          WHEN u.sku_name ILIKE '%GENIE_ONE%' THEN 'genie_one'
-          WHEN u.sku_name ILIKE '%GENIE_AGENTS%' THEN 'genie_agents'
+          WHEN get_json_object(to_json(u.usage_metadata), '$.genie.surface') = 'GENIE_CODE' OR u.sku_name ILIKE '%GENIE_CODE%' THEN 'genie_code'
+          WHEN get_json_object(to_json(u.usage_metadata), '$.genie.surface') = 'GENIE_ONE' OR u.sku_name ILIKE '%GENIE_ONE%' THEN 'genie_one'
+          WHEN get_json_object(to_json(u.usage_metadata), '$.genie.surface') = 'GENIE_AGENTS' OR u.sku_name ILIKE '%GENIE_AGENTS%' THEN 'genie_agents'
           ELSE 'unknown'
         END
       ELSE NULL
@@ -491,6 +495,8 @@ EXTRA_TABLE_REFRESH = {
         "pk": ["usage_date", "workspace_id", "sku_name", "billing_origin_product", "usage_type", "aiml_category", "genie_surface", "charge_class"],
         "source_date_col": "usage_date",
         "overlap_days": 0,
+        # 2: genie_surface from usage_metadata.genie.surface (was SKU patterns only).
+        "definition_version": 2,
     },
     "daily_job_pipeline_spend": {
         "reprocess_days": 14,

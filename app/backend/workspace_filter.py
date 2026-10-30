@@ -81,6 +81,16 @@ def build_ws_filter_clause(
     return f"AND CAST({col} AS STRING) IN ({quoted})"
 
 
+def pool_cache_tag() -> str:
+    """The saved pool as a cache-key fragment.
+
+    Requests without explicit workspace_ids are scoped by the pool, so caches for
+    them must change key when an admin changes the pool. Otherwise they keep
+    serving the previous scope's data until the TTL runs out.
+    """
+    return ",".join(sorted(get_configured_workspace_ids()))
+
+
 def is_workspace_scoped() -> bool:
     """True when workspace IDs restrict data to specific workspaces."""
     return bool(get_configured_workspace_ids())

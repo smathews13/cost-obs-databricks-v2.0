@@ -585,7 +585,7 @@ async def get_warehouse_idle_time(
             "end_date": ed,
         }
     id_list = [i.strip() for i in workspace_ids.split(",") if i.strip()] if workspace_ids else None
-    cache_key = f"{sd}:{ed}:{','.join(id_list) if id_list else ''}"
+    cache_key = f"{sd}:{ed}:{','.join(id_list) if id_list else 'pool:' + wf.pool_cache_tag()}"
 
     if (_idle_time_cache is not None
             and (time.time() - _idle_time_cache_ts) < _IDLE_TIME_CACHE_TTL

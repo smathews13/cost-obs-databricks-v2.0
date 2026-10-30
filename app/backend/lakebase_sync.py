@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 WORKSPACE_ID_SENTINEL = "__account__"
 GENERIC_KEY_SENTINEL = "__na__"
 
+# agg_sync_state.mode while a rewrite is in flight; see sync_one_aggregate.
+_REWRITE_PENDING = "rewrite_pending"
+
 # Batch size for executemany inserts.
 _INSERT_BATCH = 5000
 
@@ -325,6 +328,24 @@ def _is_not_owner_error(exc: BaseException) -> bool:
     return "must be owner" in str(exc).lower()
 
 
+def _clear_table(cur, table: str) -> None:
+    """Empty a table inside the caller's transaction.
+
+    TRUNCATE needs the TRUNCATE privilege, which the setup job's grants don't give
+    the app role on tables the job created (SELECT/INSERT/UPDATE/DELETE only), so
+    fall back to DELETE when it's refused.
+    """
+    cur.execute("SAVEPOINT clear_table")
+    try:
+        cur.execute(f'TRUNCATE TABLE "{table}"')
+    except Exception as e:
+        if _is_not_owner_error(e) or "permission denied" not in str(e).lower():
+            raise
+        cur.execute("ROLLBACK TO SAVEPOINT clear_table")
+        cur.execute(f'DELETE FROM "{table}"')
+    cur.execute("RELEASE SAVEPOINT clear_table")
+
+
 def _reclaim_table(conn, table: str) -> None:
     """Drop a leftover table owned by another Lakebase identity so this role can recreate it."""
     conn.rollback()
@@ -408,8 +429,14 @@ def sync_one_aggregate(
     cfg: dict[str, Any],
     *,
     full: bool = False,
+    rewrite: bool = False,
 ) -> dict[str, Any]:
     """Sync one Delta aggregate into its Lakebase table via chunked range-replace.
+
+    ``rewrite`` replaces the whole date range chunk by chunk, like incremental but
+    from the first date, then drops rows outside it. For a Delta table rebuilt with
+    changed history: unlike ``full`` it never empties the copy, so readers keep
+    getting rows (old or new per chunk) instead of a blank tab during the load.
 
     Reads/writes ONE date window (``_CHUNK_DAYS``) at a time so a large aggregate
     never lands in memory all at once. Full/empty → TRUNCATE then load every
@@ -444,9 +471,13 @@ def sync_one_aggregate(
         with conn.cursor() as cur:
             cur.execute(f'SELECT 1 FROM "{table}" LIMIT 1')
             table_empty = cur.fetchone() is None
-            cur.execute(f"SELECT backfilled_at FROM {_SYNC_STATE_TABLE} WHERE table_name = %s", (table,))
+            cur.execute(f"SELECT backfilled_at, mode FROM {_SYNC_STATE_TABLE} WHERE table_name = %s", (table,))
             row = cur.fetchone()
             backfill_done = bool(row and row[0])
+            # A rewrite that didn't finish left old rows outside the window it reached;
+            # keep rewriting until one completes (see _REWRITE_PENDING).
+            if not full and row and len(row) > 1 and row[1] == _REWRITE_PENDING:
+                rewrite = True
 
     do_incremental = (not full) and (not table_empty) and backfill_done and have_date
 
@@ -459,7 +490,7 @@ def sync_one_aggregate(
         rows = execute_query(build_select_sql(catalog, schema, table, specs, source_date_col=None), no_cache=True)
         tuples = _rows_to_tuples(rows, colnames)
         with get_pg_conn() as conn, conn.cursor() as cur:
-            cur.execute(f'TRUNCATE TABLE "{table}"')
+            _clear_table(cur, table)
             _insert_rows(cur, tuples)
         _finish(table, "full", None, len(tuples), None, t0)
         return {"table": table, "mode": "full", "rows": len(tuples), "window_start": None,
@@ -481,23 +512,31 @@ def sync_one_aggregate(
         return {"table": table, "mode": "full", "rows": 0, "window_start": None,
                 "max_source_date": None, "duration_ms": int((time.monotonic() - t0) * 1000)}
 
-    mode = "incremental" if do_incremental else "full"
-    if do_incremental:
+    mode = ("rewrite" if rewrite else "incremental") if do_incremental else "full"
+    if do_incremental and rewrite:
+        range_start = mn
+        # Recorded before any chunk is replaced. _finish overwrites it on success;
+        # if this run fails, the next sync sees it and rewrites again instead of
+        # dropping back to the 14-day window.
+        with get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE {_SYNC_STATE_TABLE} SET mode = %s WHERE table_name = %s", (_REWRITE_PENDING, table))
+    elif do_incremental:
         range_start = max(compute_reprocess_start(reprocess_days, overlap_days), mn)
     else:
         range_start = mn
         with get_pg_conn() as conn:  # clear before full load
             # Readers skip tables without backfilled_at, so they serve warehouse
-            # gold instead of a half-loaded copy until this load finishes.
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"UPDATE {_SYNC_STATE_TABLE} SET backfilled_at = NULL WHERE table_name = %s",
-                    (table,),
-                )
-            conn.commit()
+            # gold instead of a half-loaded copy until this load finishes. The flag
+            # and the clear commit together: a clear that fails must not leave the
+            # table flagged as loading, which readers would treat as empty forever.
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f'TRUNCATE TABLE "{table}"')
+                    cur.execute(
+                        f"UPDATE {_SYNC_STATE_TABLE} SET backfilled_at = NULL WHERE table_name = %s",
+                        (table,),
+                    )
+                    _clear_table(cur, table)
+                conn.commit()
             except Exception as e:
                 if not _is_not_owner_error(e):
                     raise
@@ -507,6 +546,12 @@ def sync_one_aggregate(
                 )
                 _reclaim_table(conn, table)
                 _ensure_pg_table(conn, table, specs, pk)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"UPDATE {_SYNC_STATE_TABLE} SET backfilled_at = NULL WHERE table_name = %s",
+                        (table,),
+                    )
+                conn.commit()
 
     total = 0
     for cs, ce in iter_date_chunks(range_start, mx, _CHUNK_DAYS):
@@ -518,6 +563,14 @@ def sync_one_aggregate(
                 cur.execute(build_delete_range_sql(table, source_date_col), (cs, ce))
             _insert_rows(cur, tuples)
         total += len(tuples)
+
+    if mode == "rewrite":
+        with get_pg_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                f'DELETE FROM "{table}" WHERE "{source_date_col}" < %s OR "{source_date_col}" > %s '
+                f'OR "{source_date_col}" IS NULL',
+                (range_start, mx),
+            )
 
     _finish(table, mode, range_start, total, mx, t0)
     return {"table": table, "mode": mode, "rows": total,
@@ -543,8 +596,13 @@ def sync_all_aggregates(
     schema: str | None = None,
     *,
     full: bool = False,
+    full_tables: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Sync every daily_* aggregate into Lakebase. Best-effort, per-table isolated.
+
+    `full_tables` have their whole history replaced even when `full` is False —
+    used for tables the Delta build just recreated, whose history may have changed.
+    They go through ``rewrite`` so the copy stays readable while it loads.
 
     No-op (returns skipped) when Lakebase is unavailable, so warehouse-only
     deploys are unaffected. Never raises — a failing table is recorded and the
@@ -584,7 +642,10 @@ def sync_all_aggregates(
     ok = 0
     for table in tables_to_sync:
         try:
-            results[table] = sync_one_aggregate(catalog, schema, table, _TABLE_REFRESH_CONFIG[table], full=full)
+            results[table] = sync_one_aggregate(
+                catalog, schema, table, _TABLE_REFRESH_CONFIG[table], full=full,
+                rewrite=not full and table in full_tables,
+            )
             ok += 1
         except Exception as e:  # isolate per-table failures
             logger.warning("lakebase_sync: %s failed (non-fatal): %s", table, e)
