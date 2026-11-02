@@ -92,8 +92,12 @@ export function SKUBreakdown({ data, isLoading, workspaces, dateRange, workspace
   const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
   if (prevFilterKey !== filterKey) {
     setPrevFilterKey(filterKey);
-    if (selectedWorkspace === "all") setFilteredData(undefined);
-    else setFilterLoading(true);
+    if (selectedWorkspace === "all") {
+      setFilteredData(undefined);
+      setFilterLoading(false);
+    } else {
+      setFilterLoading(true);
+    }
   }
 
   useEffect(() => {
@@ -104,15 +108,23 @@ export function SKUBreakdown({ data, isLoading, workspaces, dateRange, workspace
     if (dateRange?.endDate) params.set("end_date", dateRange.endDate);
     params.set("workspace_id", selectedWorkspace);
 
-    fetch(`/api/billing/sku-breakdown?${params}`)
-      .then((res) => res.json())
+    const controller = new AbortController();
+    fetch(`/api/billing/sku-breakdown?${params}`, { signal: controller.signal })
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then((json) => {
+        if (controller.signal.aborted) return;
         setFilteredData(json);
         setFilterLoading(false);
       })
       .catch(() => {
+        if (controller.signal.aborted) return;
+        setFilteredData(undefined);
         setFilterLoading(false);
       });
+    return () => controller.abort();
   }, [selectedWorkspace, dateRange?.startDate, dateRange?.endDate]);
 
   useEffect(() => {
