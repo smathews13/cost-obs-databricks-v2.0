@@ -12,17 +12,16 @@ import httpx
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
+from backend import workspace_filter as wf
 from backend.db import (
-    execute_query,
-    execute_queries_parallel,
-    get_workspace_client,
     bundle_cache_key,
     delta_cache_get,
     delta_cache_put,
+    execute_queries_parallel,
     get_local_source_label,
+    get_workspace_client,
     selected_source_labels,
 )
-from backend import workspace_filter as wf
 from backend.email_service import send_alert_email
 
 logger = logging.getLogger(__name__)
@@ -526,8 +525,14 @@ async def get_users_groups_bundle(
     }
 
     from backend.lakebase_read import (
-        PG_USERS_BY_WORKSPACE, PG_USERS_GROWTH, PG_USERS_PRODUCT, PG_USERS_SPEND_GROWTH,
-        PG_USERS_SUMMARY, PG_USERS_TIMESERIES, PG_USERS_TOP, gold_read,
+        PG_USERS_BY_WORKSPACE,
+        PG_USERS_GROWTH,
+        PG_USERS_PRODUCT,
+        PG_USERS_SPEND_GROWTH,
+        PG_USERS_SUMMARY,
+        PG_USERS_TIMESERIES,
+        PG_USERS_TOP,
+        gold_read,
     )
     queries = [
         ("summary", lambda: gold_read("users_summary", PG_USERS_SUMMARY, params, ws_clause, _ws(USERS_SUMMARY))),

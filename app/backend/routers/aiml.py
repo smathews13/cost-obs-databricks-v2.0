@@ -10,17 +10,17 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from backend import cache_ttls
+from backend import workspace_filter as wf
 from backend.db import (
-    execute_query,
-    execute_queries_parallel,
     bundle_cache_key,
     delta_cache_get,
     delta_cache_put,
+    execute_queries_parallel,
+    execute_query,
     source_label_filter_clause,
     source_scope_unavailable,
 )
-from backend import workspace_filter as wf
-from backend import cache_ttls
 
 
 def _aiml_failure_payload(
@@ -1098,10 +1098,16 @@ def _compute_aiml_bundle(params: dict, id_list: list | None, ws_clause: str, dke
             return wf.inject_ws_filter(sql, ws_clause)
 
         from backend.lakebase_read import (
-            PG_AIML_CATEGORIES, PG_AIML_ENDPOINTS, PG_AIML_PROVIDERS,
-            PG_AIML_TIMESERIES, PG_AIML_TOTALS, warehouse_view_fallback,
+            PG_AIML_AGENTS,
+            PG_AIML_CATEGORIES,
+            PG_AIML_ENDPOINTS,
+            PG_AIML_ML_CLUSTERS,
+            PG_AIML_MODELS,
+            PG_AIML_PROVIDERS,
+            PG_AIML_TIMESERIES,
+            PG_AIML_TOTALS,
+            gold_read,
         )
-        from backend.lakebase_read import PG_AIML_AGENTS, PG_AIML_ML_CLUSTERS, PG_AIML_MODELS, gold_read
         queries = [
             ("summary", lambda: _gold_then_live("aiml_summary", PG_AIML_TOTALS, params, _ws(AIML_SUMMARY), ws_clause)),
             ("providers", lambda: _gold_then_live("aiml_providers", PG_AIML_PROVIDERS, params, _ws(FMAPI_PROVIDER_COSTS), ws_clause)),

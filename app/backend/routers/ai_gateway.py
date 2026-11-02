@@ -237,7 +237,11 @@ ORDER BY u.usage_date
 
 
 def _with_inventory(bundle: dict[str, Any], tbl: str | None) -> dict[str, Any]:
-    from backend.unity_gateway import cached_inventory, list_unity_gateway_inventory, usage_schema_label
+    from backend.unity_gateway import (
+        cached_inventory,
+        list_unity_gateway_inventory,
+        usage_schema_label,
+    )
     try:
         bundle["inventory"] = cached_inventory(
             "unity-gateway", list_unity_gateway_inventory, {"model_services": [], "mcp_services": []},

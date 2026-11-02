@@ -85,6 +85,7 @@ def test_genie_conversation_count_pages_through(monkeypatch):
 
 def test_idle_time_gold_row_without_name_falls_back_to_id(monkeypatch):
     import asyncio
+
     from backend import lakebase_read
     from backend.routers import warehouse_health as wh
 

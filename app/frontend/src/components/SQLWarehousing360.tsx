@@ -49,6 +49,16 @@ const SOURCE_TYPE_COLORS: Record<string, string> = {
   Unknown: C.slate,
 };
 
+const STALE_MS = 25 * 24 * 60 * 60 * 1000;
+
+type WarehouseWithName = QueryCostByWarehouse & { workspace_name?: string | null };
+type DBSQLBundleWithTypeTimeseries = DBSQLDashboardBundle & {
+  warehouse_type_timeseries?: {
+    timeseries?: Array<Record<string, string | number>>;
+    warehouse_types?: string[];
+  };
+};
+
 const COLORS = [C.s2, C.s5, C.s3, C.s3, C.s4, C.s5, C.s1, C.lava, C.slate];
 
 const COST_TOOLTIP_TEXT = "Costs are estimates: the warehouse's billed DBU-hours are divided across all queries in the period, weighted by task duration. A fast query running during a low-activity window can inherit a large share of the hour's cost.";
@@ -135,7 +145,7 @@ interface SourceQuery {
   source_url: string | null;
 }
 
-export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryData, isLoading, topQueriesData, topQueriesLoading, host, startDate, endDate, workspaceIds, workspaceNameMap }: SQLWarehousing360Props) {
+export function SQLWarehousing360({ queryData, isLoading, topQueriesData, topQueriesLoading, host, startDate, endDate, workspaceIds, workspaceNameMap }: SQLWarehousing360Props) {
   const spNameMap = useSpNameMap();
   const [sortField, setSortField] = useState<SortField>("cost");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -151,19 +161,17 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
   const [querySourceDropdownOpen, setQuerySourceDropdownOpen] = useState(false);
   const [querySearch, setQuerySearch] = useState("");
   const [warehouseSizeWsFilter, setWarehouseSizeWsFilter] = useState<string[]>([]);
-  const warehouseSizeWsInitialized = useRef(false);
+  const [warehouseSizeWsInitialized, setWarehouseSizeWsInitialized] = useState(false);
   const [whSizeDropdownOpen, setWhSizeDropdownOpen] = useState(false);
   const [whSizeWsSearch, setWhSizeWsSearch] = useState("");
   const whSizeDropdownRef = useRef<HTMLDivElement>(null);
 
   // Close warehouse size dropdown on outside click; reset search on close so reopening starts fresh
   useEffect(() => {
-    if (!whSizeDropdownOpen) {
-      setWhSizeWsSearch("");
-      return;
-    }
+    if (!whSizeDropdownOpen) return;
     const handleClick = (e: MouseEvent) => {
       if (whSizeDropdownRef.current && !whSizeDropdownRef.current.contains(e.target as Node)) {
+        setWhSizeWsSearch("");
         setWhSizeDropdownOpen(false);
       }
     };
@@ -175,9 +183,10 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
   const sourceQueries = selectedSource ? (sourceQueriesCache[selectedSource] || []) : [];
 
   // Prefetch top queries for ALL source types when data loads
-  const prefetchSourceTypes = queryData?.by_source?.sources?.map((s) => s.query_source_type) || [];
+  const prefetchSourceKey = (queryData?.by_source?.sources?.map((s) => s.query_source_type) || []).join(",");
   useEffect(() => {
-    if (!startDate || !endDate || prefetchSourceTypes.length === 0) return;
+    if (!startDate || !endDate || !prefetchSourceKey) return;
+    const prefetchSourceTypes = prefetchSourceKey.split(",");
     let cancelled = false;
     const fetchAll = async () => {
       const results: Record<string, SourceQuery[]> = {};
@@ -199,7 +208,7 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
     };
     fetchAll();
     return () => { cancelled = true; };
-  }, [startDate, endDate, prefetchSourceTypes.join(",")]);
+  }, [startDate, endDate, prefetchSourceKey]);
 
   const handleSourceClick = (sourceType: string) => {
     setSelectedSource(sourceType);
@@ -260,7 +269,7 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
 
   const [selectedUser, setSelectedUser] = useState<{ raw: string; display: string } | null>(null);
 
-  const { data: userQueriesData, isLoading: userQueriesLoading } = useQuery<{
+  const { data: userQueriesData, isLoading: userQueriesLoading, dataUpdatedAt: userQueriesUpdatedAt } = useQuery<{
     available: boolean;
     queries: Array<{
       statement_id: string | null;
@@ -291,24 +300,24 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
     staleTime: 5 * 60 * 1000,
   });
 
-  const _STALE_MS = 25 * 24 * 60 * 60 * 1000;
   const freshUserQueries = useMemo(() => {
     if (!userQueriesData?.queries) return [];
     return userQueriesData.queries
-      .filter(q => !q.start_time || Date.now() - new Date(q.start_time).getTime() <= _STALE_MS)
+      .filter(q => !q.start_time || userQueriesUpdatedAt - new Date(q.start_time).getTime() <= STALE_MS)
       .sort((a, b) => b.cost - a.cost);
-  }, [userQueriesData]);
+  }, [userQueriesData, userQueriesUpdatedAt]);
   const staleUserQueries = useMemo(() => {
     if (!userQueriesData?.queries) return [];
     return userQueriesData.queries
-      .filter(q => q.start_time && Date.now() - new Date(q.start_time).getTime() > _STALE_MS)
+      .filter(q => q.start_time && userQueriesUpdatedAt - new Date(q.start_time).getTime() > STALE_MS)
       .sort((a, b) => b.cost - a.cost);
-  }, [userQueriesData]);
+  }, [userQueriesData, userQueriesUpdatedAt]);
 
+  const byUserRows = queryData?.by_user?.users;
   const userBarData = useMemo(() => {
-    if (!queryData?.by_user?.users) return [];
+    if (!byUserRows) return [];
     const byUser: Record<string, { user: string; rawUser: string; total_spend: number; query_count: number }> = {};
-    for (const u of queryData.by_user.users) {
+    for (const u of byUserRows) {
       if (!byUser[u.executed_by]) {
         byUser[u.executed_by] = { user: u.executed_by, rawUser: u.executed_by, total_spend: 0, query_count: 0 };
       }
@@ -319,15 +328,16 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
       .sort((a, b) => b.total_spend - a.total_spend)
       .slice(0, 10)
       .map(u => ({ ...u, user: formatIdentity(u.user, spNameMap) }));
-  }, [queryData?.by_user, spNameMap]);
+  }, [byUserRows, spNameMap]);
 
+  const timeseriesPoints = queryData?.timeseries?.timeseries;
   const timeseriesData = useMemo(() => {
-    if (!queryData?.timeseries?.timeseries) return [];
-    return queryData.timeseries.timeseries.map((point) => ({
+    if (!timeseriesPoints) return [];
+    return timeseriesPoints.map((point) => ({
       ...point,
       date: formatDate(point.date as string),
     }));
-  }, [queryData?.timeseries]);
+  }, [timeseriesPoints]);
 
   const querySourceTypes = useMemo(() => {
     if (!topQueriesData?.queries) return [];
@@ -335,22 +345,19 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
     return Array.from(types).sort();
   }, [topQueriesData]);
 
-  const querySourceTypesInitialized = useRef(false);
-  useEffect(() => {
-    if (!querySourceTypesInitialized.current && querySourceTypes.length > 0) {
-      setQuerySourceFilters([...querySourceTypes]);
-      querySourceTypesInitialized.current = true;
-    }
-  }, [querySourceTypes]);
+  const [querySourceTypesInitialized, setQuerySourceTypesInitialized] = useState(false);
+  if (!querySourceTypesInitialized && querySourceTypes.length > 0) {
+    setQuerySourceTypesInitialized(true);
+    setQuerySourceFilters([...querySourceTypes]);
+  }
 
-  useEffect(() => {
-    if (warehouseSizeWsInitialized.current) return;
-    const wsIds = Array.from(new Set((queryData?.by_warehouse?.warehouses || []).map((w: any) => w.workspace_id).filter(Boolean))) as string[];
+  if (!warehouseSizeWsInitialized) {
+    const wsIds = Array.from(new Set((queryData?.by_warehouse?.warehouses || []).map((w) => w.workspace_id).filter(Boolean))) as string[];
     if (wsIds.length > 0) {
+      setWarehouseSizeWsInitialized(true);
       setWarehouseSizeWsFilter(wsIds);
-      warehouseSizeWsInitialized.current = true;
     }
-  }, [queryData?.by_warehouse?.warehouses]);
+  }
 
   const isHistoricalQuery = (q: { executed_by: string; statement_preview: string }) =>
     !q.executed_by || q.executed_by === "Unknown" || q.statement_preview === "N/A";
@@ -713,8 +720,9 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
                       dataKey="total_spend"
                       radius={[0, 4, 4, 0]}
                       isAnimationActive={false}
-                      onClick={(entry: any) => {
-                        setSelectedUser({ raw: entry.rawUser, display: entry.user });
+                      onClick={(_entry, idx) => {
+                        const row = userBarData[idx];
+                        if (row) setSelectedUser({ raw: row.rawUser, display: row.user });
                       }}
                     >
                       {userBarData.map((_entry, idx) => (
@@ -737,7 +745,7 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
           <div className="rounded-lg bg-white p-6 border " style={{ borderColor: C.hairline }}>
               <h3 className="mb-4 text-lg font-semibold text-gray-900">Warehouse Spend by Type</h3>
               {(() => {
-                const whTypeTs = (queryData as any)?.warehouse_type_timeseries;
+                const whTypeTs = (queryData as DBSQLBundleWithTypeTimeseries | undefined)?.warehouse_type_timeseries;
                 const tsData = whTypeTs?.timeseries || [];
                 const whTypes: string[] = whTypeTs?.warehouse_types || [];
                 if (tsData.length === 0) {
@@ -791,8 +799,8 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
                 // Build workspace list with names
                 const wsMap = new Map<string, string>();
                 for (const w of allWh) {
-                  const wsId = (w as any).workspace_id;
-                  const wsName = (w as any).workspace_name;
+                  const wsId = w.workspace_id;
+                  const wsName = (w as WarehouseWithName).workspace_name;
                   if (wsId && !wsMap.has(wsId)) {
                     wsMap.set(wsId, workspaceNameMap?.[wsId] || wsName || `Workspace ${wsId}`);
                   }
@@ -831,7 +839,7 @@ export function SQLWarehousing360({ sqlBreakdownData: _sqlBreakdownData, queryDa
                       {wsEntries.length > 1 && (
                         <div className="relative" ref={whSizeDropdownRef}>
                           <button
-                            onClick={() => setWhSizeDropdownOpen(!whSizeDropdownOpen)}
+                            onClick={() => { if (whSizeDropdownOpen) setWhSizeWsSearch(""); setWhSizeDropdownOpen(!whSizeDropdownOpen); }}
                             className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${isPartialWs ? "border-lava text-lava" : "border-gray-300 text-gray-700 hover:bg-gray-50"}`}
                           >
                             {selectedWsName
@@ -1394,7 +1402,8 @@ export function OptimizeMethodologyPanel() {
   );
   const toggle = (v: boolean) => {
     setMinimized(v);
-    v ? localStorage.setItem(MINIMIZE_KEY, "true") : localStorage.removeItem(MINIMIZE_KEY);
+    if (v) localStorage.setItem(MINIMIZE_KEY, "true");
+    else localStorage.removeItem(MINIMIZE_KEY);
   };
   return (
     <InfoPanel title="Optimize tab methodology" minimized={minimized} onToggle={toggle}>

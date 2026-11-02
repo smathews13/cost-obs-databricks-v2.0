@@ -15,8 +15,8 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from backend.db import execute_query, bundle_cache_key, delta_cache_get, delta_cache_put
 from backend import cache_ttls
+from backend.db import bundle_cache_key, delta_cache_get, delta_cache_put, execute_query
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -322,7 +322,11 @@ async def get_aws_costs_by_charge_type(
     qparams = {"start_date": start_date, "end_date": end_date}
 
     def _cloud_charge():
-        from backend.lakebase_read import PG_CLOUD_BY_CHARGE_TYPE, dual_read, warehouse_view_fallback
+        from backend.lakebase_read import (
+            PG_CLOUD_BY_CHARGE_TYPE,
+            dual_read,
+            warehouse_view_fallback,
+        )
         live = (lambda: execute_query(query, qparams)) if warehouse_view_fallback() else None
         return dual_read("cloud_by_charge_type", PG_CLOUD_BY_CHARGE_TYPE, qparams, "", fetch_delta=live)
 

@@ -626,6 +626,7 @@ def sync_all_aggregates(
     # bootstrap having run first. Uses the pool's search_path schema (PGSCHEMA
     # env / COST_OBS_SCHEMA) so unqualified CREATE TABLE lands there.
     import os as _os
+
     from backend.db import get_pg_conn
     # App-owned schema so we can CREATE/INSERT even when leftover daily_* tables
     # in COST_OBS_SCHEMA belong to another Postgres role.

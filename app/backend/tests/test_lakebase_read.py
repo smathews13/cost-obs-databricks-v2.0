@@ -221,9 +221,19 @@ def test_aiml_gold_sql_covers_dashboard_queries():
 
 def test_new_gold_pg_templates_are_postgres():
     from backend.lakebase_read import (
-        PG_AIML_CATEGORIES, PG_AIML_ENDPOINTS, PG_AIML_PROVIDERS, PG_AIML_TIMESERIES,
-        PG_CLOUD_BY_CHARGE_TYPE, PG_CLOUD_SUMMARY, PG_CLOUD_TIMESERIES, PG_COST_BY_TAG, PG_DBSQL_BY_USER, PG_DBSQL_BY_WAREHOUSE,
-        PG_DBSQL_TIMESERIES, PG_DBSQL_TOP, PG_TAG_COVERAGE_TIMESERIES,
+        PG_AIML_CATEGORIES,
+        PG_AIML_ENDPOINTS,
+        PG_AIML_PROVIDERS,
+        PG_AIML_TIMESERIES,
+        PG_CLOUD_BY_CHARGE_TYPE,
+        PG_CLOUD_SUMMARY,
+        PG_CLOUD_TIMESERIES,
+        PG_COST_BY_TAG,
+        PG_DBSQL_BY_USER,
+        PG_DBSQL_BY_WAREHOUSE,
+        PG_DBSQL_TIMESERIES,
+        PG_DBSQL_TOP,
+        PG_TAG_COVERAGE_TIMESERIES,
     )
     for sql in (
         PG_AIML_PROVIDERS, PG_AIML_CATEGORIES, PG_AIML_TIMESERIES, PG_AIML_ENDPOINTS,
@@ -283,8 +293,14 @@ def test_remaining_gold_tables_registered():
 
 def test_remaining_pg_templates_are_postgres():
     from backend.lakebase_read import (
-        PG_USERS_SUMMARY, PG_USERS_TOP, PG_AIML_MODELS, PG_INFRA_CLUSTERS,
-        PG_WH_META, PG_OBJECT_SPEND, PG_AI_GATEWAY_ROWS, PG_UNTAGGED,
+        PG_AI_GATEWAY_ROWS,
+        PG_AIML_MODELS,
+        PG_INFRA_CLUSTERS,
+        PG_OBJECT_SPEND,
+        PG_UNTAGGED,
+        PG_USERS_SUMMARY,
+        PG_USERS_TOP,
+        PG_WH_META,
     )
     for sql in (PG_USERS_SUMMARY, PG_USERS_TOP, PG_AIML_MODELS, PG_INFRA_CLUSTERS, PG_WH_META, PG_OBJECT_SPEND, PG_AI_GATEWAY_ROWS):
         formatted = sql.format(ws_filter="")
@@ -298,8 +314,14 @@ def test_remaining_pg_templates_are_postgres():
 
 def test_viewer_gold_pg_templates_are_postgres():
     from backend.lakebase_read import (
-        PG_APPS_IDENTITIES, PG_AVAILABLE_QUERIES, PG_AZURE_SUMMARY, PG_GCP_SUMMARY,
-        PG_KPI_BILLING, PG_STICKINESS, PG_WAREHOUSE_IDLE, PG_WORKSPACE_LIST,
+        PG_APPS_IDENTITIES,
+        PG_AVAILABLE_QUERIES,
+        PG_AZURE_SUMMARY,
+        PG_GCP_SUMMARY,
+        PG_KPI_BILLING,
+        PG_STICKINESS,
+        PG_WAREHOUSE_IDLE,
+        PG_WORKSPACE_LIST,
         PLATFORM_KPI_TREND_PG,
     )
     for sql in (PG_WORKSPACE_LIST, PG_WAREHOUSE_IDLE, PG_KPI_BILLING, PG_STICKINESS, PG_APPS_IDENTITIES):
@@ -347,7 +369,8 @@ def test_cluster_vm_cost_uses_instance_pricing_when_gold_has_no_dollars():
 
 def test_kpi_trend_response_empty_and_daily():
     from backend.routers.billing import _kpi_trend_response
-    identity = lambda d: d
+    def identity(d):
+        return d
     empty = _kpi_trend_response("total_spend", "daily", [], identity)
     assert empty["data_points"] == []
     out = _kpi_trend_response(

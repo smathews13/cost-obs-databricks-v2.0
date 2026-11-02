@@ -11,7 +11,6 @@ import pytest
 from backend import db
 from backend.routers import health
 
-
 _CLEAR_ENV = (
     "DATABRICKS_APP_NAME",
     "DATABRICKS_CLIENT_ID",

@@ -22,12 +22,12 @@ function getClusterUrl(host: string | null | undefined, _clusterId: string, work
   return workspaceUrl(host, `/compute/interactive${workspaceParam}`);
 }
 
-function getJobUrl(host: string | null | undefined, jobId: string, _workspaceId?: string): string | null {
+function getJobUrl(host: string | null | undefined, jobId: string): string | null {
   if (!host || !jobId) return null;
   return workspaceUrl(host, `/jobs/${jobId}`);
 }
 
-function getPipelineUrl(host: string | null | undefined, pipelineId: string, _workspaceId?: string): string | null {
+function getPipelineUrl(host: string | null | undefined, pipelineId: string): string | null {
   if (!host || !pipelineId) return null;
   return workspaceUrl(host, `/pipelines/${pipelineId}`);
 }
@@ -78,7 +78,6 @@ const ALL_RESOURCE_TYPES: Exclude<UntaggedTab, "all">[] = ["clusters", "jobs", "
 
 export function UntaggedResourcesTable({
   data, host, suggestedTags, untaggedCounts,
-  activeUntaggedTab: _activeUntaggedTab, onTabChange: _onTabChange,
   searchQuery, onSearchChange,
   currentPage, onPageChange,
   sortField, sortDirection, onSort,
@@ -134,7 +133,7 @@ export function UntaggedResourcesTable({
   const getItems = () => {
     // Multiple types selected — return an "all"-style union with a _type discriminator.
     if (!singleTypeSelected) {
-      const items: any[] = [];
+      const items: Record<string, unknown>[] = [];
       // Empty selection (from Clear) is treated as "show all" so Clear doesn't hide every row.
       const has = (t: Exclude<UntaggedTab, "all">) => selectedResourceTypes.length === 0 || selectedResourceTypes.includes(t);
       if (has("clusters")) items.push(...(data.untagged.clusters?.items || []).map(i => ({ ...i, _name: i.cluster_name, _id: i.cluster_id, _type: "clusters" })));
@@ -208,7 +207,7 @@ export function UntaggedResourcesTable({
   const startIndex = (currentPage - 1) * itemsPerPage;
   const paginatedItems = sortedItems.slice(startIndex, startIndex + itemsPerPage);
 
-  const SortIcon = ({ field }: { field: string }) => {
+  const renderSortIcon = (field: string) => {
     if (sortField !== field) return <span className="ml-1 text-gray-300">↕</span>;
     return <span className="ml-1">{sortDirection === "asc" ? "↑" : "↓"}</span>;
   };
@@ -355,21 +354,21 @@ export function UntaggedResourcesTable({
             <thead className="bg-gray-50">
               <tr>
                 <th className="cursor-pointer px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => onSort(resourceConfig.idKey)}>
-                  {resourceConfig.label} <SortIcon field={resourceConfig.idKey} />
+                  {resourceConfig.label} {renderSortIcon(resourceConfig.idKey)}
                 </th>
                 {extraColumns.map((col) => (
                   <th key={col.key} className="cursor-pointer px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => onSort(col.key)}>
-                    {col.label} <SortIcon field={col.key} />
+                    {col.label} {renderSortIcon(col.key)}
                   </th>
                 ))}
                 <th className="cursor-pointer px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => onSort("total_dbus")}>
-                  DBUs <SortIcon field="total_dbus" />
+                  DBUs {renderSortIcon("total_dbus")}
                 </th>
                 <th className="cursor-pointer px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => onSort("total_spend")}>
-                  Spend <SortIcon field="total_spend" />
+                  Spend {renderSortIcon("total_spend")}
                 </th>
                 <th className="cursor-pointer px-6 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => onSort("days_active")}>
-                  Days Active <SortIcon field="days_active" />
+                  Days Active {renderSortIcon("days_active")}
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Suggested Tags</th>
                 <th className="px-6 py-3 text-center text-xs font-medium uppercase tracking-wider text-gray-500">Actions</th>
@@ -382,8 +381,8 @@ export function UntaggedResourcesTable({
                 const effectiveType = activeUntaggedTab === "all" ? (item._type as string) : activeUntaggedTab;
                 switch (effectiveType) {
                   case "clusters": resourceUrl = getClusterUrl(host, item.cluster_id as string, workspaceId); break;
-                  case "jobs": resourceUrl = getJobUrl(host, item.job_id as string, workspaceId); break;
-                  case "pipelines": resourceUrl = getPipelineUrl(host, item.pipeline_id as string, workspaceId); break;
+                  case "jobs": resourceUrl = getJobUrl(host, item.job_id as string); break;
+                  case "pipelines": resourceUrl = getPipelineUrl(host, item.pipeline_id as string); break;
                   case "warehouses": resourceUrl = getWarehouseUrl(host, item.warehouse_id as string, workspaceId); break;
                   case "endpoints": resourceUrl = getEndpointUrl(host, item.endpoint_name as string, workspaceId); break;
                 }

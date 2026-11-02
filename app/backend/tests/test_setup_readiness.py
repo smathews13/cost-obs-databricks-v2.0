@@ -3,7 +3,8 @@
 Run with: pytest server/tests/test_setup_readiness.py -v
 """
 import time
-from concurrent.futures import Future, TimeoutError as FutureTimeoutError
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from unittest.mock import MagicMock, patch
 
 import pytest

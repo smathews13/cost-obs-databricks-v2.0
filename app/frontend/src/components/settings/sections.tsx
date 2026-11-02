@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AppSettings, TabVisibility, SettingsCapabilities } from "../SettingsDialog";
 import { SettingsConfig } from "./SettingsConfig";
@@ -7,11 +7,12 @@ import { SettingsPermissions } from "./SettingsPermissions";
 import { SettingsResources } from "./SettingsResources";
 import {
   SectionTitle, Group, Row, Toggle, Select, TextInput, UnitInput, Badge, MonoChip,
-  SecondaryButton, LinkButton, Callout, useToast, T, MONO,
+  SecondaryButton, LinkButton, Callout, T, MONO,
 } from "./dubois";
+import { useToast } from "./toast";
 
 // Tab labels for landing-tab select + visibility list (spec §6 order).
-export const TAB_LABELS: Record<keyof TabVisibility, string> = {
+const TAB_LABELS: Record<keyof TabVisibility, string> = {
   dbu: "$DBU Spend", sql: "SQL", "ai-gateway": "Unity Gateway", genie: "Genie", apps: "Apps",
   tagging: "Tagging", "users-groups": "Users", kpis: "Platform KPIs & Trends",
   infra: "Cloud Costs", optimizer: "Optimize", "use-cases": "Use Cases",
@@ -251,11 +252,10 @@ function ScheduleGroup() {
   const { data } = useQuery<Schedule>({
     queryKey: ["settings-schedule"], queryFn: () => fetch("/api/settings/schedule").then(r => r.ok ? r.json() : SCHED_DEFAULTS).catch(() => SCHED_DEFAULTS), staleTime: 300000,
   });
-  const [s, setS] = useState<Schedule>(data ?? SCHED_DEFAULTS);
-  const synced = useRef(!!data);
-  useEffect(() => { if (data && !synced.current) { setS(data); synced.current = true; } }, [data]);
+  const [edited, setEdited] = useState<Schedule | null>(null);
+  const s = edited ?? data ?? SCHED_DEFAULTS;
   const save = (next: Schedule) => {
-    synced.current = true; setS(next);
+    setEdited(next);
     fetch("/api/settings/schedule", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) }).then(() => toast("Refresh schedule saved")).catch(() => toast("Could not save schedule"));
   };
   const hours = Array.from({ length: 24 }, (_, h) => ({ value: h, label: `${String(h).padStart(2, "0")}:00 UTC` }));

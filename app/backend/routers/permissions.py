@@ -23,8 +23,9 @@ def _get_check_client():
     so the permissions display reflects the actual requesting user, not the
     globally locked identity. Falls back to the SP singleton when no token present.
     """
-    from backend.db import _user_token
     from databricks.sdk import WorkspaceClient
+
+    from backend.db import _user_token
     user_token = _user_token.get()
     if user_token:
         host = os.getenv("DATABRICKS_HOST", "")
@@ -120,6 +121,7 @@ def check_table_access(table: str) -> tuple[bool, str]:
         logger.debug(f"SDK check failed for {table} ({e}), trying SQL fallback")
 
     import os
+
     from backend.db import execute_query
     http_path = os.getenv("DATABRICKS_HTTP_PATH", "")
     if http_path and http_path.lower() != "auto":

@@ -16,19 +16,19 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from backend import cache_ttls
+from backend import workspace_filter as wf
 from backend.db import (
-    execute_query,
-    execute_queries_parallel,
-    get_catalog_schema,
-    get_host_url,
     bundle_cache_key,
     delta_cache_get,
     delta_cache_put,
+    execute_queries_parallel,
+    execute_query,
+    get_catalog_schema,
+    get_host_url,
     source_label_filter_clause,
     source_scope_unavailable,
 )
-from backend import workspace_filter as wf
-from backend import cache_ttls
 
 logger = logging.getLogger(__name__)
 
@@ -230,8 +230,13 @@ def create_dbsql_router(table_name: str) -> APIRouter:
             return execute_query(query, params)
 
         from backend.lakebase_read import (
-            PG_DBSQL_BY_SOURCE, PG_DBSQL_BY_USER, PG_DBSQL_BY_WAREHOUSE,
-            PG_DBSQL_SUMMARY, PG_DBSQL_TIMESERIES, PG_DBSQL_TOP, dual_read,
+            PG_DBSQL_BY_SOURCE,
+            PG_DBSQL_BY_USER,
+            PG_DBSQL_BY_WAREHOUSE,
+            PG_DBSQL_SUMMARY,
+            PG_DBSQL_TIMESERIES,
+            PG_DBSQL_TOP,
+            dual_read,
             warehouse_view_fallback,
         )
         pg = {
@@ -273,7 +278,12 @@ def create_dbsql_router(table_name: str) -> APIRouter:
             ws_clause = wf.build_ws_filter_clause(col="workspace_id", id_list=id_list)
             params = {"start_date": start_date, "end_date": end_date}
 
-            from backend.lakebase_read import PG_REGION_SCOPE, PG_WH_META, PG_WH_TYPE_BILLING, gold_read
+            from backend.lakebase_read import (
+                PG_REGION_SCOPE,
+                PG_WH_META,
+                PG_WH_TYPE_BILLING,
+                gold_read,
+            )
             queries = [
                 ("summary",      lambda: _exec("summary",      params, catalog, schema, ws_clause)),
                 ("by_source",    lambda: _exec("by_source",    params, catalog, schema, ws_clause)),

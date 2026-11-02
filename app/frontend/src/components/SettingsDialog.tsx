@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SettingsAccuracyChecks, SettingsDebugger } from "./settings";
@@ -6,149 +6,25 @@ import { READINESS_QUERY_KEY } from "@/hooks/useFeatureAvailability";
 import { SetupWizard } from "./SetupWizard";
 import { WorkspaceScopeSection } from "./WorkspaceScope";
 import {
-  ToastProvider, useToast, Badge, T,
+  ToastProvider, Badge, T,
 } from "./settings/dubois";
+import { useToast } from "./settings/toast";
 import {
   GeneralSection, DashboardTabsSection, AlertsSection, DataTablesSection,
   AccessSection, ResourcesSection, ExperimentalSection,
 } from "./settings/sections";
+import {
+  DASHBOARD_TAB_ORDER, DEFAULT_APP_SETTINGS, DEFAULT_VISIBILITY,
+  firstVisibleDashboardTab, saveAppSettings, saveTabVisibility,
+} from "./settings/appSettings";
+import type { AppSettings, TabVisibility } from "./settings/appSettings";
 import "./settings/settings.css";
 import { APP_VERSION } from "@/theme";
 
-export interface TabVisibility {
-  dbu: boolean;
-  infra: boolean;
-  optimizer: boolean;
-  kpis: boolean;
-  "ai-gateway": boolean;
-  genie: boolean;
-  sql: boolean;
-  apps: boolean;
-  tagging: boolean;
-  "use-cases": boolean;
-  "users-groups": boolean;
-  conversational: boolean;
-}
-
-export const DASHBOARD_TAB_ORDER: Array<keyof TabVisibility> = [
-  "dbu",
-  "sql",
-  "ai-gateway",
-  "genie",
-  "apps",
-  "tagging",
-  "users-groups",
-  "kpis",
-  "infra",
-  "optimizer",
-  "use-cases",
-];
-
-export function firstVisibleDashboardTab(visibility: TabVisibility): keyof TabVisibility {
-  return DASHBOARD_TAB_ORDER.find((key) => visibility[key]) ?? "dbu";
-}
-
-const DEFAULT_VISIBILITY: TabVisibility = {
-  dbu: true, infra: true, optimizer: true, kpis: true, "ai-gateway": true, genie: true,
-  sql: true, apps: true, tagging: true, "use-cases": false, "users-groups": true, conversational: true,
-};
-
-const STORAGE_KEY = "coc-tab-visibility";
-
-export function loadTabVisibility(): TabVisibility {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return { ...DEFAULT_VISIBILITY, ...JSON.parse(stored) };
-  } catch { /* ignore */ }
-  return DEFAULT_VISIBILITY;
-}
-
-function saveTabVisibility(visibility: TabVisibility) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(visibility));
-}
-
-// ── App Settings ────────────────────────────────────────────────────────────
-export interface AppSettings {
-  defaultDateRangeDays: 7 | 14 | 30 | 60 | 90;
-  refreshIntervalMinutes: 0 | 5 | 15 | 30;
-  compactMode: boolean;              // deprecated — migrated to `density`
-  darkMode: boolean;                 // deprecated — migrated to `theme`
-  density: "comfortable" | "compact";
-  theme: "light" | "dark" | "system";
-  defaultLandingTab: string;
-  showWorkspaceNames: boolean;
-  anomalySensitivity: "low" | "medium" | "high";
-  expSetupWizardLink: boolean;
-  expDebuggerLink: boolean;
-  enableArchitectureView: boolean;
-  enableMvShareRunbook: boolean;
-  companyName: string;
-  appDisplayName: string;
-  monthlyBudget: number;
-  costAllocationTags: string;
-  alertSpikePercent: number;
-  alertDailyBudget: number;
-  alertWorkspaceBudget: number;
-  slackWebhookUrl: string;
-  enableAppHostingComparison: boolean;
-  enableUseCaseTracking: boolean;
-  enableAccuracyChecks: boolean;
-  anonymizeUsers: boolean;
-}
-
-const DEFAULT_APP_SETTINGS: AppSettings = {
-  defaultDateRangeDays: 30,
-  refreshIntervalMinutes: 0,
-  compactMode: false,
-  darkMode: false,
-  density: "comfortable",
-  theme: "light",
-  defaultLandingTab: "dbu",
-  showWorkspaceNames: true,
-  anomalySensitivity: "medium",
-  expSetupWizardLink: false,
-  expDebuggerLink: false,
-  enableArchitectureView: true,
-  enableMvShareRunbook: true,
-  companyName: "",
-  appDisplayName: "",
-  monthlyBudget: 0,
-  costAllocationTags: "",
-  alertSpikePercent: 20,
-  alertDailyBudget: 50000,
-  alertWorkspaceBudget: 10000,
-  slackWebhookUrl: "",
-  enableAppHostingComparison: false,
-  enableUseCaseTracking: false,
-  enableAccuracyChecks: false,
-  anonymizeUsers: false,
-};
-
-const APP_SETTINGS_KEY = "coc-app-settings";
-
-export function loadAppSettings(): AppSettings {
-  try {
-    const stored = localStorage.getItem(APP_SETTINGS_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored);
-      const merged = { ...DEFAULT_APP_SETTINGS, ...parsed } as AppSettings;
-      // Migrate deprecated boolean toggles into the new selects (only when the new
-      // keys are absent, so an explicit new choice always wins).
-      if (parsed.theme === undefined) merged.theme = parsed.darkMode ? "dark" : "light";
-      if (parsed.density === undefined) merged.density = parsed.compactMode ? "compact" : "comfortable";
-      return merged;
-    }
-  } catch { /* ignore */ }
-  return { ...DEFAULT_APP_SETTINGS };
-}
-
-function saveAppSettings(settings: AppSettings) {
-  // Keep the deprecated booleans in sync so any un-migrated reader still works.
-  const out = { ...settings, darkMode: settings.theme === "dark", compactMode: settings.density === "compact" };
-  localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(out));
-}
+export type { AppSettings, TabVisibility } from "./settings/appSettings";
 
 type NavKey = "general" | "tabs" | "alerts" | "data" | "scope" | "access" | "resources" | "experimental";
+const ADMIN_SECTIONS: NavKey[] = ["alerts", "data", "scope", "access", "experimental"];
 type Overlay = "setup" | "debugger" | "accuracy" | null;
 
 export interface SettingsCapabilities {
@@ -192,8 +68,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
 function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVisibility, appSettings }: SettingsDialogProps) {
   const rqClient = useQueryClient();
   const toast = useToast();
-  const [nav, setNav] = useState<NavKey>("general");
-  const [overlay, setOverlay] = useState<Overlay>(null);
+  const [navChoice, setNav] = useState<NavKey>("general");
+  const [overlayChoice, setOverlay] = useState<Overlay>(null);
   const [localVisibility, setLocalVisibility] = useState<TabVisibility>(tabVisibility);
   const [localSettings, setLocalSettings] = useState<AppSettings>(appSettings);
   const [dirty, setDirty] = useState(false);
@@ -227,10 +103,9 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
     staleTime: 60 * 1000,
   });
   const caps = unified?.capabilities;
-  const seededRef = useRef(false);
-  useEffect(() => {
-    if (!unified || dirty || seededRef.current) return;
-    seededRef.current = true;
+  const [seeded, setSeeded] = useState(false);
+  if (unified && !dirty && !seeded) {
+    setSeeded(true);
     const g = (unified.general || {}) as Record<string, unknown>;
     const num = (v: unknown, d: number) => (typeof v === "number" ? v : d);
     setLocalSettings((prev) => ({
@@ -255,7 +130,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
       enableMvShareRunbook: unified.experimental?.enable_mv_share_runbook ?? prev.enableMvShareRunbook,
     }));
     if (unified.tab_visibility) setLocalVisibility((prev) => ({ ...prev, ...unified.tab_visibility }));
-  }, [unified, dirty]);
+  }
 
   // Prefer a real display name; never show the raw SP client-id UUID. Falls back to
   // the app's product name.
@@ -269,18 +144,18 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
     "cost-obs-v2";
   const version = appConfig?.version?.commit_sha;
 
-  useEffect(() => {
+  const [syncedProps, setSyncedProps] = useState({ tabVisibility, appSettings });
+  if (syncedProps.tabVisibility !== tabVisibility || syncedProps.appSettings !== appSettings) {
+    setSyncedProps({ tabVisibility, appSettings });
     setLocalVisibility(tabVisibility);
     setLocalSettings(appSettings);
     setDirty(false);
-  }, [tabVisibility, appSettings]);
+  }
 
-  // Kick non-admins out of admin-only sections/overlays.
-  useEffect(() => {
-    const adminSections: NavKey[] = ["alerts", "data", "scope", "access", "experimental"];
-    if (permissions && !isAdmin && adminSections.includes(nav)) setNav("general");
-    if (permissions && !isAdmin && overlay) setOverlay(null);
-  }, [permissions, isAdmin, nav, overlay]);
+  // Non-admins never see admin-only sections or overlays.
+  const lockedOut = !!permissions && !isAdmin;
+  const nav: NavKey = lockedOut && ADMIN_SECTIONS.includes(navChoice) ? "general" : navChoice;
+  const overlay: Overlay = lockedOut ? null : overlayChoice;
 
   const requestClose = useCallback(() => {
     if (dirty && !window.confirm("You have unsaved changes. Discard them?")) return;
@@ -369,7 +244,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
     onTabVisibilityChange({ ...DEFAULT_VISIBILITY });
     // Persist the reset to the server too, so it survives reopen (the modal re-seeds
     // from GET /api/settings). Admin-only on the server; no-op for consumers.
-    seededRef.current = true; // don't let the in-flight GET re-seed over the reset
+    setSeeded(true); // don't let the in-flight GET re-seed over the reset
     fetch("/api/settings", {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

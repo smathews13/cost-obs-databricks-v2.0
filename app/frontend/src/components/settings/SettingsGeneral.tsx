@@ -50,20 +50,12 @@ export function SettingsGeneral({ localSettings, updateSetting, saveStatus, setS
     updateSetting("alertWorkspaceBudget", savedThresholds.workspace_budget);
   }, [savedThresholds]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Initialize from cache (warm) or defaults (cold); useEffect syncs once when data loads.
-  const [localSchedule, setLocalSchedule] = useState<ScheduleSettings>(() => scheduleData ?? SCHEDULE_DEFAULTS);
-  const scheduleSynced = useRef(!!scheduleData);
-
-  useEffect(() => {
-    if (scheduleData && !scheduleSynced.current) {
-      setLocalSchedule(scheduleData);
-      scheduleSynced.current = true;
-    }
-  }, [scheduleData]);
+  // The user's edit wins; until then show the saved schedule, or defaults while it loads.
+  const [editedSchedule, setEditedSchedule] = useState<ScheduleSettings | null>(null);
+  const localSchedule = editedSchedule ?? scheduleData ?? SCHEDULE_DEFAULTS;
 
   const updateSchedule = (next: ScheduleSettings) => {
-    scheduleSynced.current = true;  // prevent data load from overwriting user edit
-    setLocalSchedule(next);
+    setEditedSchedule(next);
     onScheduleChange(next);
   };
 

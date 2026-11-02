@@ -480,9 +480,10 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
   }, [data?.workspaces, workspaceNameMap]);
 
   // Available workspaces for filtering (resolved to names)
+  const workspacesData = data?.workspaces;
   const availableWorkspaces = useMemo(() => {
-    if (!data?.workspaces) return [];
-    return data.workspaces
+    if (!workspacesData) return [];
+    return workspacesData
       // Drop null/"None"/"null" ids so a stringified null never becomes an option.
       .filter(ws => ws.id != null && !["", "none", "null"].includes(String(ws.id).trim().toLowerCase()))
       .map(ws => {
@@ -492,7 +493,7 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
         return { id: ws.id, name, historical: name === `Workspace ${ws.id}` };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
-  }, [data?.workspaces, resolveWsName]);
+  }, [workspacesData, resolveWsName]);
 
   // Sync-add: unseen workspace IDs get added to the filter automatically.
   useEffect(() => {
@@ -510,8 +511,9 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
   }, [selectedWorkspaces, availableWorkspaces]);
 
   // Filter apps by search query and workspace
+  const appsBundle = data?.apps;
   const filteredApps = useMemo(() => {
-    if (!data?.apps?.apps) return [];
+    if (!appsBundle?.apps) return [];
     // Empty or all-selected → treat as "show all" so Clear doesn't silently
     // hide every row and the default "all workspaces" state doesn't drop apps
     // that have no workspace_names (registry-only rows with no billing yet).
@@ -520,9 +522,9 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
     // workspace_names is [] whenever there's no APPS billing to map from).
     const isPartial = selectedWorkspaces.length > 0
       && selectedWorkspaces.length < availableWorkspaces.length;
-    let apps = !isPartial
-      ? data.apps.apps
-      : data.apps.apps.filter(a =>
+    const apps = !isPartial
+      ? appsBundle.apps
+      : appsBundle.apps.filter(a =>
           !a.workspace_names?.length
           || a.workspace_names.some(ws => selectedWorkspaceKeys.has(ws))
         );
@@ -531,12 +533,14 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
     return apps.filter(
       (a) => a.app_name.toLowerCase().includes(q) || a.app_id.toLowerCase().includes(q)
     );
-  }, [data?.apps, searchQuery, selectedWorkspaces.length, selectedWorkspaceKeys, availableWorkspaces.length]);
+  }, [appsBundle, searchQuery, selectedWorkspaces.length, selectedWorkspaceKeys, availableWorkspaces.length]);
 
   // Reset to page 1 whenever filters change
-  useEffect(() => {
+  const [appsPageFilters, setAppsPageFilters] = useState({ searchQuery, selectedWorkspaces });
+  if (appsPageFilters.searchQuery !== searchQuery || appsPageFilters.selectedWorkspaces !== selectedWorkspaces) {
+    setAppsPageFilters({ searchQuery, selectedWorkspaces });
     setAppsPage(1);
-  }, [searchQuery, selectedWorkspaces]);
+  }
 
   // Tiles aren't always in spend order (idle registry apps come first), so scale
   // against the largest spend shown rather than the first tile.
@@ -551,42 +555,42 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
 
   // Build pie chart data: Active vs Inactive vs Historical (unregistered)
   const pieData = useMemo(() => {
-    if (!data?.apps) return [];
-    const appsData = data.apps;
+    if (!appsBundle) return [];
     const slices: { name: string; value: number; fill: string; count: number }[] = [];
 
-    if (appsData.active_count > 0) {
+    if (appsBundle.active_count > 0) {
       slices.push({
         name: "Active",
-        value: appsData.active_count,
+        value: appsBundle.active_count,
         fill: PIE_COLORS.active,
-        count: appsData.active_count,
+        count: appsBundle.active_count,
       });
     }
-    if (appsData.inactive_count > 0) {
+    if (appsBundle.inactive_count > 0) {
       slices.push({
         name: "Inactive",
-        value: appsData.inactive_count,
+        value: appsBundle.inactive_count,
         fill: PIE_COLORS.inactive,
-        count: appsData.inactive_count,
+        count: appsBundle.inactive_count,
       });
     }
-    if (appsData.unregistered_summary.count > 0) {
+    if (appsBundle.unregistered_summary.count > 0) {
       slices.push({
         name: "Historical",
-        value: appsData.unregistered_summary.count,
+        value: appsBundle.unregistered_summary.count,
         fill: PIE_COLORS.historical,
-        count: appsData.unregistered_summary.count,
+        count: appsBundle.unregistered_summary.count,
       });
     }
     return slices;
-  }, [data?.apps]);
+  }, [appsBundle]);
 
   // Daily timeseries (raw from API, matches date picker range)
+  const timeseriesData = data?.timeseries;
   const dailyTimeseries = useMemo(() => {
-    if (!data?.timeseries?.timeseries?.length) return [];
-    return data.timeseries.timeseries;
-  }, [data?.timeseries]);
+    if (!timeseriesData?.timeseries?.length) return [];
+    return timeseriesData.timeseries;
+  }, [timeseriesData]);
 
   if (isLoading) {
     return (
@@ -727,7 +731,7 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
 
       {selectedKPI && startDate && endDate && (
         <KPITrendModal
-          kpi={selectedKPI.kpi as any}
+          kpi={selectedKPI.kpi}
           kpiLabel={selectedKPI.label}
           isOpen={!!selectedKPI}
           onClose={() => setSelectedKPI(null)}

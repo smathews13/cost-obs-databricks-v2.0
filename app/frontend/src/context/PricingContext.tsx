@@ -7,34 +7,9 @@
  * date range and workspaces (see setPricingScope). The Overview and
  * infrastructure spend figures are scaled by it; other tabs stay at list price.
  */
-import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import { PricingContext } from "./pricingState";
 
-interface PricingState {
-  useAccountPrices: boolean;
-  multiplier: number;
-  discountPercent: number;
-  skuCount: number;
-  available: boolean;
-  loading: boolean;
-  /** Scale a spend amount by the active pricing multiplier */
-  applyPricing: (amount: number) => number;
-  /** Toggle the setting and reload multiplier */
-  setUseAccountPrices: (enabled: boolean) => Promise<void>;
-  /** Weight the multiplier by usage in this date range / workspace selection */
-  setPricingScope: (startDate?: string, endDate?: string, workspaceIds?: string[]) => void;
-}
-
-const PricingContext = createContext<PricingState>({
-  useAccountPrices: false,
-  multiplier: 1.0,
-  discountPercent: 0,
-  skuCount: 0,
-  available: false,
-  loading: true,
-  applyPricing: (x) => x,
-  setUseAccountPrices: async () => {},
-  setPricingScope: () => {},
-});
 
 export function PricingProvider({ children }: { children: React.ReactNode }) {
   const [useAccountPrices, setUseAccountPricesState] = useState(false);
@@ -128,8 +103,4 @@ export function PricingProvider({ children }: { children: React.ReactNode }) {
       {children}
     </PricingContext.Provider>
   );
-}
-
-export function usePricing() {
-  return useContext(PricingContext);
 }

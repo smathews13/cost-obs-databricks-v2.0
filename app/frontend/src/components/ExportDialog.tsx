@@ -5,26 +5,11 @@ import { C } from "@/theme";
 import { useDocumentScrollLock } from "@/utils/scrolling";
 import { CostObsMark } from "@/components/brand";
 import { Spinner } from "@/components/Spinner";
+import { SECTION_TO_TAB } from "@/components/exportSections";
+import type { ExportFormat, ExportSections } from "@/components/exportSections";
 
-export interface ExportSections {
-  summary: boolean;
-  products: boolean;
-  workspaces: boolean;
-  skus: boolean;
-  pipelines: boolean;
-  interactive: boolean;
-  query360: boolean;
-  aiml: boolean;
-  apps: boolean;
-  tagging: boolean;
-  users: boolean;
-  platformKPIs: boolean;
-  anomalies: boolean;
-  awsCosts: boolean;
-  optimize: boolean;
-}
+export type { ExportFormat, ExportSections } from "@/components/exportSections";
 
-export type ExportFormat = "pdf" | "csv";
 
 const FOCUSABLE = [
   "a[href]",
@@ -52,36 +37,6 @@ interface ExportDialogProps {
   onPrepare?: (sections: ExportSections) => void;
   onSelectionChange?: (sections: ExportSections) => void;
   onRetryFailed?: () => Promise<void>;
-}
-
-export const SECTION_TO_TAB: Record<keyof ExportSections, keyof TabVisibility | null> = {
-  summary: "dbu",
-  products: "dbu",
-  workspaces: "dbu",
-  skus: "dbu",
-  pipelines: "dbu",
-  interactive: "dbu",
-  query360: "sql",
-  aiml: "ai-gateway",
-  apps: "apps",
-  tagging: "tagging",
-  users: "users-groups",
-  platformKPIs: "kpis",
-  anomalies: "kpis",
-  awsCosts: "infra",
-  optimize: "optimizer",
-};
-
-export function getRequiredExportTabs(
-  sections: ExportSections,
-  visibility: TabVisibility,
-): Array<keyof TabVisibility> {
-  return Array.from(new Set(
-    (Object.keys(SECTION_TO_TAB) as Array<keyof ExportSections>)
-      .filter((section) => sections[section])
-      .map((section) => SECTION_TO_TAB[section])
-      .filter((tab): tab is keyof TabVisibility => Boolean(tab && visibility[tab])),
-  ));
 }
 
 const tabLabels: Record<keyof TabVisibility, string> = {

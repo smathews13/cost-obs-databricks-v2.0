@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { AppSettings } from "../SettingsDialog";
-import { usePricing } from "@/context/PricingContext";
+import { usePricing } from "@/context/pricingState";
 
 interface SettingsExperimentalProps {
   localSettings: AppSettings;

@@ -10,8 +10,7 @@ Covers:
 
 Run with: pytest server/tests/test_feature_gating.py -v
 """
-from concurrent.futures import Future
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 

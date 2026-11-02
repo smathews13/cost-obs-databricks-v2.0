@@ -5,7 +5,6 @@ clusters across different cloud providers.
 """
 
 from enum import Enum
-from typing import Any
 
 
 class CloudProvider(Enum):

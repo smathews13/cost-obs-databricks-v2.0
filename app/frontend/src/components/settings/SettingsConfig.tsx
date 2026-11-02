@@ -118,7 +118,6 @@ export function SettingsConfig() {
       _mvPollInterval = setInterval(() => _mvPollCallback?.(), 30_000);
     }
     return () => { _mvPollCallback = null; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handleMvRefresh() {

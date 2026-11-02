@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { Spinner } from "./Spinner";
-import { ReadinessChecks, normalizeReadinessResult } from "./settings/ReadinessChecks";
+import { ReadinessChecks } from "./settings/ReadinessChecks";
+import { normalizeReadinessResult } from "./settings/readiness";
 import { WorkspaceScopePicker } from "./WorkspaceScope";
 import { useWorkspaceScopeEditor } from "@/hooks/useWorkspaceScopeEditor";
 import type { ReadinessResult } from "./settings/ReadinessChecks";

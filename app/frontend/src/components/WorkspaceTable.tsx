@@ -66,9 +66,13 @@ export const WorkspaceTable = memo(function WorkspaceTable({ data, isLoading, ho
   const [userSearch, setUserSearch] = useState("");
   const productDropdownRef = useRef<HTMLDivElement>(null);
   const userDropdownRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    // Reset user search when its dropdown closes so reopening starts fresh
+  // Reset user search when its dropdown closes so reopening starts fresh
+  const [prevUserDropdownOpen, setPrevUserDropdownOpen] = useState(userDropdownOpen);
+  if (prevUserDropdownOpen !== userDropdownOpen) {
+    setPrevUserDropdownOpen(userDropdownOpen);
     if (!userDropdownOpen) setUserSearch("");
+  }
+  useEffect(() => {
     if (!productDropdownOpen && !userDropdownOpen) return;
     const handler = (e: MouseEvent) => {
       if (productDropdownOpen && productDropdownRef.current && !productDropdownRef.current.contains(e.target as Node)) setProductDropdownOpen(false);

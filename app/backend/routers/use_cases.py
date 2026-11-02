@@ -5,10 +5,11 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from backend.db import execute_query, execute_write, execute_queries_parallel, clear_query_cache
+from backend.db import clear_query_cache, execute_queries_parallel, execute_query, execute_write
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -191,20 +192,6 @@ async def create_use_case(request: CreateUseCaseRequest) -> dict[str, Any]:
             "live_date": request.live_date
         }
 
-        uc_record = {
-            "use_case_id": use_case_id,
-            "name": request.name,
-            "description": request.description,
-            "owner": request.owner,
-            "tags": request.tags or {},
-            "created_at": now,
-            "updated_at": now,
-            "status": "active",
-            "stage": request.stage or "Development",
-            "start_date": request.start_date,
-            "end_date": request.end_date,
-            "live_date": request.live_date,
-        }
         execute_write(query, params)
 
         logger.info(f"Created use case: {use_case_id}")
@@ -234,7 +221,7 @@ async def create_use_case(request: CreateUseCaseRequest) -> dict[str, Any]:
 async def get_use_case_tags() -> dict[str, Any]:
     """Get all unique tag keys and values from existing use cases."""
     try:
-        results = await asyncio.to_thread(execute_query, 
+        results = await asyncio.to_thread(execute_query,
             "SELECT tags FROM cost_observability.use_cases WHERE status = 'active' AND tags IS NOT NULL",
             {},
             cache_tag="use_case"
@@ -598,19 +585,6 @@ async def assign_object_to_use_case(
             "custom_end_date": request.custom_end_date
         }
 
-        obj_record = {
-            "mapping_id": mapping_id,
-            "use_case_id": use_case_id,
-            "object_type": request.object_type,
-            "object_id": request.object_id,
-            "object_name": request.object_name,
-            "workspace_id": request.workspace_id,
-            "assigned_at": now,
-            "assigned_by": request.assigned_by,
-            "notes": request.notes,
-            "custom_start_date": request.custom_start_date,
-            "custom_end_date": request.custom_end_date,
-        }
         execute_write(query, params)
 
         logger.info(f"Assigned {request.object_type} {request.object_id} to use case {use_case_id}")
@@ -657,7 +631,7 @@ async def remove_object_from_use_case(
 
         return {
             "success": True,
-            "message": f"Object removed from use case"
+            "message": "Object removed from use case"
         }
     except Exception as e:
         logger.error(f"Error removing object from use case: {e}")
@@ -678,7 +652,7 @@ async def get_use_case_analytics(
     """
     try:
         # Import here to avoid circular dependency
-        from backend.routers.billing import get_default_start_date, get_default_end_date
+        from backend.routers.billing import get_default_end_date, get_default_start_date
 
         params = {
             "use_case_id": use_case_id,
@@ -878,7 +852,7 @@ async def get_monthly_consumption(
     """
     try:
         from datetime import date, timedelta
-        from backend.routers.billing import get_default_start_date, get_default_end_date
+
 
         # Default to last 12 months if not specified
         if not start_date:
@@ -1067,8 +1041,11 @@ async def get_available_objects(
             )
 
         from backend.lakebase_read import (
-            PG_AVAILABLE_DASHBOARDS, PG_AVAILABLE_OBJECTS, PG_AVAILABLE_QUERIES,
-            gold_read, warehouse_view_fallback,
+            PG_AVAILABLE_DASHBOARDS,
+            PG_AVAILABLE_OBJECTS,
+            PG_AVAILABLE_QUERIES,
+            gold_read,
+            warehouse_view_fallback,
         )
         if object_type in ("cluster", "warehouse", "pipeline", "endpoint", "job"):
             results = await asyncio.to_thread(

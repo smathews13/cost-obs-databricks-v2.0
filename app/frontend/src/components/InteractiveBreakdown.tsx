@@ -66,7 +66,7 @@ export function InteractiveBreakdown({ data, isLoading, host }: InteractiveBreak
     setCurrentPage(1);
   };
 
-  const SortIcon = ({ field }: { field: SortField }) => {
+  const renderSortIcon = (field: SortField) => {
     if (sortField !== field) {
       return <span className="ml-1 text-gray-300">↕</span>;
     }
@@ -297,7 +297,7 @@ export function InteractiveBreakdown({ data, isLoading, host }: InteractiveBreak
                 onClick={() => handleSort(viewMode === "by-user" ? "user" : viewMode === "by-cluster" ? "cluster_id" : "notebook_path")}
               >
                 {viewMode === "by-user" ? "User" : viewMode === "by-cluster" ? "Cluster" : "Notebook"}
-                <SortIcon field={viewMode === "by-user" ? "user" : viewMode === "by-cluster" ? "cluster_id" : "notebook_path"} />
+                {renderSortIcon(viewMode === "by-user" ? "user" : viewMode === "by-cluster" ? "cluster_id" : "notebook_path")}
               </th>
               {viewMode === "by-notebook" && (
                 <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
@@ -308,19 +308,19 @@ export function InteractiveBreakdown({ data, isLoading, host }: InteractiveBreak
                 className="cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("total_spend")}
               >
-                Spend <SortIcon field="total_spend" />
+                Spend {renderSortIcon("total_spend")}
               </th>
               <th
                 className="cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("total_dbus")}
               >
-                DBUs <SortIcon field="total_dbus" />
+                DBUs {renderSortIcon("total_dbus")}
               </th>
               <th
                 className="cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("days_active")}
               >
-                Days <SortIcon field="days_active" />
+                Days {renderSortIcon("days_active")}
               </th>
               <th className="px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">
                 %

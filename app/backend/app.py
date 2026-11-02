@@ -10,14 +10,35 @@ import time
 import uuid
 import weakref
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from backend.routers import ai_gateway, aiml, apps, aws_actual, azure_actual, gcp_actual, billing, conversational, dbsql, debug, genie_cost, health, permissions, settings, setup, tagging, use_cases, user, users_groups, warehouse_health
+from backend.routers import (
+    ai_gateway,
+    aiml,
+    apps,
+    aws_actual,
+    azure_actual,
+    billing,
+    conversational,
+    dbsql,
+    debug,
+    gcp_actual,
+    genie_cost,
+    health,
+    permissions,
+    settings,
+    setup,
+    tagging,
+    use_cases,
+    user,
+    users_groups,
+    warehouse_health,
+)
 
 # Budget router is internal-only (excluded from external mirror). Import
 # defensively so builds without budget.py still start up.
@@ -58,7 +79,7 @@ class UserAuthMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] == "http":
-            from backend.db import _user_token, _auth_mode, set_source_labels, reset_source_labels
+            from backend.db import _auth_mode, _user_token, reset_source_labels, set_source_labels
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
             raw_token = headers.get(b"x-forwarded-access-token", b"").decode()
             # If auth mode is locked to SP, never use the user token — every query
@@ -133,7 +154,7 @@ def setup_and_check_warehouse():
     3. Logs the warehouse configuration for verification
     """
     try:
-        from backend.db import setup_warehouse_connection, get_workspace_client
+        from backend.db import get_workspace_client, setup_warehouse_connection
 
         # Set up the warehouse connection (creates dedicated warehouse if needed)
         http_path = setup_warehouse_connection()
@@ -251,7 +272,11 @@ def setup_system_table_grants():
         # Also grant the current identity permission to create the app schema.
         # Needed when sql scope is not configured and the SP runs DDL.
         # Fails silently if the SP isn't a catalog owner/metastore admin.
-        from backend.db import get_catalog_schema, validate_app_storage_target, StorageConfigurationError
+        from backend.db import (
+            StorageConfigurationError,
+            get_catalog_schema,
+            validate_app_storage_target,
+        )
         catalog, schema = get_catalog_schema()
         try:
             validate_app_storage_target(catalog, schema)
@@ -362,8 +387,16 @@ def setup_materialized_views():
     — the wizard or a configuration fix is required before any writes happen.
     """
     try:
-        from backend.db import get_catalog_schema, validate_app_storage_target, StorageConfigurationError, execute_query
-        from backend.materialized_views import check_materialized_views_exist, create_materialized_views
+        from backend.db import (
+            StorageConfigurationError,
+            execute_query,
+            get_catalog_schema,
+            validate_app_storage_target,
+        )
+        from backend.materialized_views import (
+            check_materialized_views_exist,
+            create_materialized_views,
+        )
 
         catalog, schema = get_catalog_schema()
 
@@ -419,6 +452,7 @@ def setup_materialized_views():
             from backend.db import get_mv_sources
             if get_mv_sources():
                 import threading as _uth
+
                 from backend.materialized_views import rebuild_unified_views
                 _uth.Thread(
                     target=lambda: rebuild_unified_views(catalog, schema), daemon=True
@@ -499,8 +533,10 @@ def _run_mv_refresh(user_token: str | None = None, lookback_days: int = 180, for
     import os
     import time
     from datetime import datetime, timezone
+
+    from backend.db import _user_token as _db_user_token
+    from backend.db import get_catalog_schema
     from backend.materialized_views import refresh_materialized_views
-    from backend.db import get_catalog_schema, _user_token as _db_user_token
 
     # Always run DDL as the service principal regardless of whether a user token
     # is present.  The forwarded OAuth token (sql scope) grants SELECT access but
@@ -638,8 +674,8 @@ def startup_tasks():
 
     # Step 0c: Grant the active identity access to all required system tables
     # Only run on first setup — grants are persistent, no need to re-run every restart.
-    from backend.routers.setup import SETUP_DONE_FILE
     from backend.db import read_dbfs_setup_complete
+    from backend.routers.setup import SETUP_DONE_FILE
     _setup_complete = os.path.exists(SETUP_DONE_FILE) or read_dbfs_setup_complete()
     if not _setup_complete:
         setup_system_table_grants()
@@ -811,9 +847,9 @@ async def lifespan(app: FastAPI):
     # MV refresh scheduler — frequency/hour configurable via Settings > General.
     # Defaults: nightly at 05:00 UTC. Uses a file lock so only one worker fires.
     async def _daily_mv_refresh_loop():
-        from datetime import datetime, timezone, timedelta
         import fcntl
         import json as _sched_json
+        from datetime import datetime, timezone
 
         def _last_rebuild_dt():
             _log = os.path.join(os.path.dirname(__file__), "..", ".settings", "mv_refresh_log.json")

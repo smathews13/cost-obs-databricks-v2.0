@@ -43,7 +43,7 @@ export function UserGroupBreakdown({ data, isLoading }: UserGroupBreakdownProps)
         total_spend: g.total_spend,
         user_count: g.user_count,
       }));
-  }, [data]);
+  }, [data, isGroups]);
 
   if (isLoading) {
     return (

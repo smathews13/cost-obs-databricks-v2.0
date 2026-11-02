@@ -12,9 +12,12 @@ import { WorkspaceFilter } from "@/components/WorkspaceFilter";
 import { SourceLabelFilter } from "@/components/SourceLabelFilter";
 import { TopProgressBar } from "@/components/TopProgressBar";
 import { SKUBreakdown } from "@/components/SKUBreakdown";
-import { ExportDialog, getRequiredExportTabs, type ExportSections, type ExportFormat } from "@/components/ExportDialog";
-import { SettingsDialog, loadTabVisibility, loadAppSettings, firstVisibleDashboardTab, type TabVisibility, type AppSettings } from "@/components/SettingsDialog";
-import { PricingProvider, usePricing } from "@/context/PricingContext";
+import { ExportDialog } from "@/components/ExportDialog";
+import { getRequiredExportTabs, type ExportSections, type ExportFormat } from "@/components/exportSections";
+import { SettingsDialog } from "@/components/SettingsDialog";
+import { loadTabVisibility, loadAppSettings, firstVisibleDashboardTab, type TabVisibility, type AppSettings } from "@/components/settings/appSettings";
+import { PricingProvider } from "@/context/PricingContext";
+import { usePricing } from "@/context/pricingState";
 import { SpNameMapContext } from "@/utils/identity";
 import { Footer } from "@/components/Footer";
 import { C } from "@/theme";
@@ -98,7 +101,7 @@ import {
   useUsersGroupsBundle,
   fetchJson,
 } from "@/hooks/useBillingData";
-import type { DateRange, WorkspaceBreakdown } from "@/types/billing";
+import type { DateRange, InfraClusterCost, WorkspaceBreakdown } from "@/types/billing";
 import { generateCostReport } from "@/utils/pdfExport";
 import { generateCostCSV } from "@/utils/csvExport";
 
@@ -119,6 +122,8 @@ function useKeepAlive() {
 
 // AI/ML content is now under the Unity Gateway tab as the default "Cost" sub-tab
 // (V2.1_SPEC §4.3). "aiml" is no longer a top-level tab value.
+type InfraClusterWithWorkspace = InfraClusterCost & { workspace_id?: string | null; workspace_name?: string | null };
+
 type ViewTab = "dbu" | "sql" | "infra" | "optimizer" | "kpis" | "ai-gateway" | "genie" | "apps" | "tagging" | "use-cases" | "users-groups";
 
 const DASHBOARD_TABS: Array<{ id: ViewTab; label: string; icon: React.ReactNode }> = [
@@ -1015,8 +1020,8 @@ function Dashboard() {
       total_dbu_hours: c.total_dbu_hours,
       days_active: c.days_active,
       percentage: c.percentage,
-      workspace_id: (c as any).workspace_id || "",
-      workspace_name: (c as any).workspace_name ?? null,
+      workspace_id: (c as InfraClusterWithWorkspace).workspace_id || "",
+      workspace_name: (c as InfraClusterWithWorkspace).workspace_name ?? null,
       state: null,
       estimated_aws_cost: c.estimated_cost,
     })),
@@ -1112,7 +1117,7 @@ function Dashboard() {
             total_dbu_hours: c.total_dbu_hours,
             days_active: c.days_active,
             percentage: c.percentage,
-            workspace_id: (c as any).workspace_id || "",
+            workspace_id: (c as InfraClusterWithWorkspace).workspace_id || "",
             state: null,
             estimated_aws_cost: c.estimated_cost,
           })),

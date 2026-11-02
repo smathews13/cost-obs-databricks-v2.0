@@ -15,9 +15,9 @@ import pytest
 
 import backend.routers.permissions as perms_mod
 from backend.routers.permissions import (
+    REQUIRED_PERMISSIONS,
     _check_permissions_sync,
     _get_sp_info,
-    REQUIRED_PERMISSIONS,
 )
 
 

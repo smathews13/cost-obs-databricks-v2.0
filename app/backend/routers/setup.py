@@ -4,11 +4,19 @@ import asyncio
 import json
 import logging
 import os
+import re as _re
+import threading
+import time
+from concurrent.futures import Future as _Future
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 
+from backend.db import _user_token as _db_user_token
+from backend.db import get_workspace_client
 from backend.materialized_views import (
     _MV_TABLES,
     _build_errors,
@@ -18,7 +26,6 @@ from backend.materialized_views import (
     get_catalog_schema,
     refresh_materialized_views,
 )
-from backend.db import get_workspace_client, _user_token as _db_user_token
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -312,7 +319,8 @@ def _grant_sp_schema_access(catalog: str, schema: str) -> dict:
     ok = failed = 0
     errors: list[str] = []
 
-    from backend.db import execute_query as _exec, _user_token as _exec_tok
+    from backend.db import _user_token as _exec_tok
+    from backend.db import execute_query as _exec
     for sql_stmt, label in grant_stmts:
         ctx = _exec_tok.set("")  # force SP auth for sql scope
         try:
@@ -945,7 +953,7 @@ def _clean_sdk_error(msg: str) -> str:
 
 def _execute_as_sp(sql: str) -> list[dict]:
     """Execute a query as the SP — explicitly clears the user token from context."""
-    from backend.db import execute_query, _user_token
+    from backend.db import _user_token, execute_query
     tok = _user_token.set("")
     try:
         return execute_query(sql, no_cache=True) or []
@@ -1454,7 +1462,7 @@ async def refresh_aws_cur_tables(
     This incrementally loads new CUR data from S3 and refreshes
     the silver and gold tables.
     """
-    from backend.aws_cur_setup import refresh_cur_tables, get_catalog_schema
+    from backend.aws_cur_setup import get_catalog_schema, refresh_cur_tables
 
     cat, sch = get_catalog_schema()
     target_catalog = catalog or cat
@@ -1505,8 +1513,9 @@ async def bootstrap_admin(request: Request) -> dict[str, Any]:
     user_email = request.headers.get("X-Forwarded-Email", "")
     if not user_email:
         try:
-            from backend.db import get_user_workspace_client
             import asyncio as _asyncio
+
+            from backend.db import get_user_workspace_client
             loop = _asyncio.get_running_loop()
             me = await loop.run_in_executor(
                 None, lambda: get_user_workspace_client().current_user.me()
@@ -1620,7 +1629,8 @@ def _grant_user_catalog_visibility(
             f"GRANT SELECT ON SCHEMA `{catalog}`.`{schema}` TO `{grantee}`",
             f"GRANT MANAGE ON SCHEMA `{catalog}`.`{schema}` TO `{grantee}`",
         ]
-    from backend.db import execute_query as _exec, _user_token as _exec_tok
+    from backend.db import _user_token as _exec_tok
+    from backend.db import execute_query as _exec
     applied: list[str] = []
     failed: list[dict] = []
     ctx = _exec_tok.set("")  # clear user token → SP M2M auth (has sql scope + owns objects)
@@ -1686,7 +1696,8 @@ async def ensure_catalog(request: Request) -> dict[str, Any]:
         if not user_token or not sp_id:
             return False
         try:
-            from backend.db import execute_query as _exec, _user_token as _exec_tok
+            from backend.db import _user_token as _exec_tok
+            from backend.db import execute_query as _exec
             # Run the GRANT as the calling user (catalog owner). The user token is
             # set directly in the ContextVar so get_connection() uses it for auth.
             ctx = _exec_tok.set(user_token)
@@ -1711,7 +1722,8 @@ async def ensure_catalog(request: Request) -> dict[str, Any]:
         if not user_token or not sp_id:
             return False
         try:
-            from backend.db import execute_query as _exec, _user_token as _exec_tok
+            from backend.db import _user_token as _exec_tok
+            from backend.db import execute_query as _exec
             ctx = _exec_tok.set(user_token)
             try:
                 _exec(f"GRANT CREATE CATALOG ON METASTORE TO `{sp_id}`", no_cache=True)
@@ -1888,8 +1900,9 @@ async def grant_catalog_access(request: Request) -> dict[str, Any]:
     user_email = request.headers.get("X-Forwarded-Email", "")
 
     try:
-        from backend.db import get_user_workspace_client
         from databricks.sdk.service.catalog import SecurableType
+
+        from backend.db import get_user_workspace_client
 
         loop = _asyncio.get_running_loop()
 
@@ -1991,13 +2004,6 @@ async def generate_token() -> dict[str, Any]:
 # Readiness Checks
 # ============================================================================
 
-import re as _re
-import threading
-import time
-from concurrent.futures import Future as _Future
-from dataclasses import dataclass
-from enum import Enum
-
 
 class CheckStatus(str, Enum):
     HEALTHY = "healthy"
@@ -2071,7 +2077,7 @@ def _run_blocking_warehouse_check() -> WarehouseCheckResult:
     if no warehouse is resolvable, instead of letting execute_query fail
     with an unhelpful connection error.
     """
-    from backend.db import execute_query, _user_token
+    from backend.db import _user_token, execute_query
     source, warehouse_id = _resolve_warehouse_config()
     if source == "none":
         return WarehouseCheckResult(
@@ -2222,8 +2228,8 @@ def _build_fix_sql(table: str, sp_client_id: str) -> str:
 
 def _check_table_as_sp(table: str) -> tuple[bool, str]:
     """Run check_table_access with the user token cleared (forces SP auth)."""
-    from backend.routers.permissions import check_table_access
     from backend.db import _user_token
+    from backend.routers.permissions import check_table_access
     tok = _user_token.set("")
     try:
         return check_table_access(table)
@@ -2303,6 +2309,7 @@ def _calc_overall(
 def _check_readiness_sync(bypass_cache: bool = False) -> dict[str, Any]:
     """Run all readiness checks as the SP and return a categorized result."""
     from concurrent.futures import as_completed
+
     from backend.routers.permissions import REQUIRED_PERMISSIONS
 
     global _table_readiness_cache, _table_readiness_cache_ts
@@ -2491,6 +2498,7 @@ async def list_workspaces() -> dict:
         logger.warning("list-workspaces: daily_workspace_breakdown unavailable (%s) — using the top-nav workspace list", e)
 
     from datetime import date, timedelta
+
     from backend.routers.billing import workspace_list
     # Unscoped: the picker must offer workspaces outside the current pool.
     data = await workspace_list(
@@ -2742,8 +2750,8 @@ async def save_workspace_filter(request: Request) -> dict:
     An empty list means all workspaces and clears the saved pool. Admins can change
     the pool at any time; every save replaces the previous one.
     """
-    import time as _time
     import re as _re
+    import time as _time
     t0 = _time.monotonic()
 
     from backend.routers.user import _get_user_role
@@ -2855,7 +2863,7 @@ async def drop_mvs() -> dict:
 @router.get("/mv-overrides")
 async def get_mv_overrides() -> dict:
     """Return current MV table name overrides and the default table names."""
-    from backend.db import get_mv_table_overrides, get_catalog_schema
+    from backend.db import get_catalog_schema, get_mv_table_overrides
     catalog, schema = get_catalog_schema()
     overrides = get_mv_table_overrides()
     tables = []
@@ -2873,7 +2881,7 @@ async def get_mv_overrides() -> dict:
 @router.post("/mv-overrides")
 async def save_mv_overrides(request: Request) -> dict:
     """Persist MV table name overrides. Send {} or omit a key to clear an override."""
-    from backend.db import save_mv_table_overrides, get_mv_table_overrides
+    from backend.db import save_mv_table_overrides
     body = await request.json()
     overrides_raw: dict = body.get("overrides", {})
     # Only keep non-empty string values for known logical names

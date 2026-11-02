@@ -56,7 +56,6 @@ const WsRow = memo(function WsRow({ wsId, wsName, selected, onToggle, historical
 });
 
 export function SKUBreakdown({ data, isLoading, workspaces, dateRange, workspaceNameMap }: SKUBreakdownProps) {
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string>("all");
   const [workspaceFilters, setWorkspaceFilters] = useState<string[]>([]);
   const workspaceFiltersSeen = useRef<Set<string>>(new Set());
   const [filteredData, setFilteredData] = useState<SKUBreakdownResponse | undefined>(undefined);
@@ -85,20 +84,21 @@ export function SKUBreakdown({ data, isLoading, workspaces, dateRange, workspace
   // an empty selection is functionally "all" — don't flag it as an active filter.
   const isWorkspaceFilterActive = workspaceFilters.length > 0 && workspaceFilters.length < allWorkspaceIds.length;
 
-  // Sync workspaceFilters → selectedWorkspace for the existing fetch logic.
   // Only route through the workspace-scoped endpoint when the user has selected exactly one;
   // "all selected" (default) and any partial multi-selection use the account-wide payload.
-  useEffect(() => {
-    setSelectedWorkspace(workspaceFilters.length === 1 ? workspaceFilters[0] : "all");
-  }, [workspaceFilters]);
+  const selectedWorkspace = workspaceFilters.length === 1 ? workspaceFilters[0] : "all";
+
+  const filterKey = `${selectedWorkspace}|${dateRange?.startDate ?? ""}|${dateRange?.endDate ?? ""}`;
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (prevFilterKey !== filterKey) {
+    setPrevFilterKey(filterKey);
+    if (selectedWorkspace === "all") setFilteredData(undefined);
+    else setFilterLoading(true);
+  }
 
   useEffect(() => {
-    if (selectedWorkspace === "all") {
-      setFilteredData(undefined);
-      return;
-    }
+    if (selectedWorkspace === "all") return;
 
-    setFilterLoading(true);
     const params = new URLSearchParams();
     if (dateRange?.startDate) params.set("start_date", dateRange.startDate);
     if (dateRange?.endDate) params.set("end_date", dateRange.endDate);
@@ -116,12 +116,10 @@ export function SKUBreakdown({ data, isLoading, workspaces, dateRange, workspace
   }, [selectedWorkspace, dateRange?.startDate, dateRange?.endDate]);
 
   useEffect(() => {
-    if (!dropdownOpen) {
-      setWsSearch("");
-      return;
-    }
+    if (!dropdownOpen) return;
     const handleClick = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setWsSearch("");
         setDropdownOpen(false);
       }
     };
@@ -162,7 +160,7 @@ export function SKUBreakdown({ data, isLoading, workspaces, dateRange, workspace
   const workspaceSelector = workspaces && workspaces.length > 1 ? (
     <div className="relative" ref={dropdownRef}>
       <button
-        onClick={() => setDropdownOpen(!dropdownOpen)}
+        onClick={() => { if (dropdownOpen) setWsSearch(""); setDropdownOpen(!dropdownOpen); }}
         className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${isWorkspaceFilterActive ? "border-lava text-lava" : "border-gray-300 text-gray-700 hover:bg-gray-50"}`}
       >
         {workspaceFilters.length === 1

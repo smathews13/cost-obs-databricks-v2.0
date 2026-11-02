@@ -1,4 +1,3 @@
-import { C, FONT_MONO } from "@/theme";
 import { ChartTooltipFrame } from "@/components/brand";
 
 type Payload = { name?: string; value?: number; color?: string; dataKey?: string | number };
@@ -27,7 +26,3 @@ export function InkTooltip({
     />
   );
 }
-
-export const axisTick = { fontSize: 10.5, fill: C.muted, fontFamily: FONT_MONO };
-export const gridStroke = C.gridLine;
-export const baselineStroke = C.baseline;

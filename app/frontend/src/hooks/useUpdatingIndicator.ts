@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useIsFetching } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 // Drives the same "Updating…" spinner the data-source filter uses, for dropdowns
 // whose change triggers a background refetch (workspace filter, date range) rather
@@ -7,7 +7,7 @@ import { useIsFetching } from "@tanstack/react-query";
 // stays true from then until a fetch cycle completes (seen in-flight, then settled),
 // with a safety timeout so it never sticks if nothing actually refetches.
 export function useUpdatingIndicator(maxMs = 12000): { updating: boolean; arm: () => void } {
-  const fetching = useIsFetching();
+  const queryClient = useQueryClient();
   const [updating, setUpdating] = useState(false);
   const sawInFlight = useRef(false);
   const grace = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -22,9 +22,12 @@ export function useUpdatingIndicator(maxMs = 12000): { updating: boolean; arm: (
 
   useEffect(() => {
     if (!updating) return;
-    if (fetching > 0) sawInFlight.current = true;
-    else if (sawInFlight.current) stop();   // a real fetch cycle completed
-  }, [updating, fetching]);
+    if (queryClient.isFetching() > 0) sawInFlight.current = true;
+    return queryClient.getQueryCache().subscribe(() => {
+      if (queryClient.isFetching() > 0) sawInFlight.current = true;
+      else if (sawInFlight.current) stop();   // a real fetch cycle completed
+    });
+  }, [updating, queryClient]);
 
   useEffect(() => () => { if (grace.current) clearTimeout(grace.current); if (maxT.current) clearTimeout(maxT.current); }, []);
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+
 def _merge(table: str, pk: list[str], src_sql: str) -> str:
     parts = []
     for c in pk:

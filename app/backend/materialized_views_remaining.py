@@ -953,5 +953,6 @@ WHERE usage_date BETWEEN :start_date AND :end_date {ws_filter}
 """,
 }
 
-from backend.materialized_views_viewer import VIEWER_GOLD_SQL
+from backend.materialized_views_viewer import VIEWER_GOLD_SQL  # noqa: E402, I001 — late to avoid a circular import
+
 REMAINING_GOLD_SQL.update(VIEWER_GOLD_SQL)

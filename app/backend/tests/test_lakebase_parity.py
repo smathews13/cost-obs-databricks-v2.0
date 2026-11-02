@@ -17,7 +17,6 @@ from backend.lakebase_parity import (
     compare_values,
 )
 
-
 # ── compare_values ────────────────────────────────────────────────────────────
 
 def test_compare_values_exact_numeric():

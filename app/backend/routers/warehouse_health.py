@@ -16,8 +16,8 @@ from typing import Any
 from fastapi import APIRouter
 
 from backend.db import (
-    execute_query,
     execute_queries_parallel,
+    execute_query,
     local_source_is_selected,
 )
 
@@ -604,7 +604,10 @@ async def get_warehouse_idle_time(
     }
 
     from backend.lakebase_read import (
-        PG_WAREHOUSE_IDLE, PG_WAREHOUSE_IDLE_SERVERLESS, gold_read, warehouse_view_fallback,
+        PG_WAREHOUSE_IDLE,
+        PG_WAREHOUSE_IDLE_SERVERLESS,
+        gold_read,
+        warehouse_view_fallback,
     )
     sql = _build_idle_time_sql(ws_clause, ws_clause_wh)
     try:

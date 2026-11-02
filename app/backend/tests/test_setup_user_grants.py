@@ -94,6 +94,7 @@ def test_role_lookup_failure_means_no_grants(monkeypatch):
 
 def test_created_tables_reports_a_failed_listing(monkeypatch):
     import asyncio
+
     import pytest
     from fastapi import HTTPException
 

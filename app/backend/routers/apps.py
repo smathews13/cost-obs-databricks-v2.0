@@ -9,12 +9,6 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any
 
-# Matches standard Databricks service principal UUID format
-_SP_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{8,12}$",
-    re.IGNORECASE,
-)
-
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
@@ -34,6 +28,12 @@ from backend.db import (
     source_scope_unavailable,
 )
 from backend.routers.billing import _check_mv_available
+
+# Matches standard Databricks service principal UUID format
+_SP_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{8,12}$",
+    re.IGNORECASE,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

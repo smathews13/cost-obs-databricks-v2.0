@@ -1,6 +1,6 @@
 """Workspace job URL helper used by Settings → setup job link."""
 
-from backend.routers.settings import build_workspace_job_url, _resolve_setup_job_id
+from backend.routers.settings import _resolve_setup_job_id, build_workspace_job_url
 
 
 def test_job_url_empty_without_host_or_id():

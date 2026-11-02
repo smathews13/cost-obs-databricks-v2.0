@@ -529,6 +529,7 @@ async def _check_lakebase() -> dict[str, Any]:
         return {"status": "not_configured", "message": "PGHOST not set — Lakebase disabled"}
     try:
         import asyncio
+
         from backend.db import lakebase_healthy
         loop = asyncio.get_running_loop()
         t0 = time.time()
@@ -570,7 +571,7 @@ async def _check_database() -> dict[str, Any]:
 def _get_cache_stats() -> dict[str, Any]:
     """Get query cache statistics."""
     try:
-        from backend.db import _query_cache, _CACHE_MAX_SIZE, _CACHE_TTL
+        from backend.db import _CACHE_MAX_SIZE, _CACHE_TTL, _query_cache
 
         current_size = len(_query_cache)
 
@@ -700,7 +701,14 @@ async def query_diagnostics() -> dict[str, Any]:
     SQL tests run in a thread pool so this endpoint never blocks the event loop.
     """
     import asyncio
-    from backend.db import execute_query, get_auth_status, _user_token, _auth_mode, get_catalog_schema
+
+    from backend.db import (
+        _auth_mode,
+        _user_token,
+        execute_query,
+        get_auth_status,
+        get_catalog_schema,
+    )
 
     diag: dict[str, Any] = {
         "auth": get_auth_status(),
@@ -781,8 +789,13 @@ async def billing_diagnostics() -> dict[str, Any]:
     import asyncio
     import os
     import time
-    from backend.db import execute_query, get_auth_status, get_catalog_schema, _auth_mode, _user_token
-    from backend.routers.billing import _mv_cache, _check_mv_available
+
+    from backend.db import (
+        execute_query,
+        get_auth_status,
+        get_catalog_schema,
+    )
+    from backend.routers.billing import _check_mv_available, _mv_cache
 
     catalog, schema = get_catalog_schema()
     now = time.time()
@@ -812,11 +825,14 @@ async def billing_diagnostics() -> dict[str, Any]:
 
     def _run_billing_tests() -> tuple[dict, dict]:
         from backend.materialized_views import (
-            MV_BILLING_SUMMARY, MV_BILLING_BY_PRODUCT, MV_BILLING_BY_WORKSPACE,
-            MV_BILLING_TIMESERIES, MV_ETL_BREAKDOWN,
+            MV_BILLING_BY_PRODUCT,
+            MV_BILLING_BY_WORKSPACE,
+            MV_BILLING_SUMMARY,
+            MV_BILLING_TIMESERIES,
+            MV_ETL_BREAKDOWN,
         )
+        from backend.queries import BILLING_BY_PRODUCT_FAST, BILLING_BY_WORKSPACE, BILLING_SUMMARY
         from backend.routers.billing import _exec_mv
-        from backend.queries import BILLING_SUMMARY, BILLING_BY_PRODUCT_FAST, BILLING_BY_WORKSPACE
 
         mv_tests: dict[str, str] = {}
         fallback_tests: dict[str, str] = {}
@@ -859,6 +875,7 @@ async def billing_diagnostics() -> dict[str, Any]:
 async def debug_env():
     """Debug: show detected environment (temporary)."""
     import os
+
     from backend.db import get_host_url
     host = get_host_url()
     cloud = None
@@ -888,9 +905,10 @@ async def setup_diagnostics() -> dict[str, Any]:
     Hit this on the AWS app when setup stalls:
       https://<app-url>/api/setup-diag
     """
-    import os
     import asyncio
-    from backend.db import get_catalog_schema, get_workspace_client, _user_token, _auth_mode
+    import os
+
+    from backend.db import _auth_mode, _user_token, get_catalog_schema, get_workspace_client
 
     catalog, schema = get_catalog_schema()
     http_path = os.getenv("DATABRICKS_HTTP_PATH", "NOT SET")

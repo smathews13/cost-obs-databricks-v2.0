@@ -17,7 +17,7 @@ function formatNumber(value: number): string {
   }).format(value);
 }
 
-function getObjectUrl(host: string | null | undefined, objectType: string, objectId: string, _workspaceId: string | null): string | null {
+function getObjectUrl(host: string | null | undefined, objectType: string, objectId: string): string | null {
   if (!host || !objectId) return null;
   if (objectType === "Job") {
     return workspaceUrl(host, `/jobs/${objectId}`);
@@ -63,7 +63,7 @@ export const PipelineObjectsTable = memo(function PipelineObjectsTable({ data, i
     setCurrentPage(1);
   };
 
-  const SortIcon = ({ field }: { field: SortField }) => {
+  const renderSortIcon = (field: SortField) => {
     if (sortField !== field) {
       return <span className="ml-1 text-gray-300">↕</span>;
     }
@@ -216,13 +216,13 @@ export const PipelineObjectsTable = memo(function PipelineObjectsTable({ data, i
                 className="cursor-pointer px-3 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("object_type")}
               >
-                Type <SortIcon field="object_type" />
+                Type {renderSortIcon("object_type")}
               </th>
               <th
                 className="cursor-pointer px-3 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("object_name")}
               >
-                Name <SortIcon field="object_name" />
+                Name {renderSortIcon("object_name")}
               </th>
               <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">
                 Owner
@@ -231,19 +231,19 @@ export const PipelineObjectsTable = memo(function PipelineObjectsTable({ data, i
                 className="cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("total_spend")}
               >
-                Spend <SortIcon field="total_spend" />
+                Spend {renderSortIcon("total_spend")}
               </th>
               <th
                 className="cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("total_dbus")}
               >
-                DBUs <SortIcon field="total_dbus" />
+                DBUs {renderSortIcon("total_dbus")}
               </th>
               <th
                 className="cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700"
                 onClick={() => handleSort("total_runs")}
               >
-                Runs <SortIcon field="total_runs" />
+                Runs {renderSortIcon("total_runs")}
               </th>
               <th className="px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">
                 %
@@ -252,7 +252,7 @@ export const PipelineObjectsTable = memo(function PipelineObjectsTable({ data, i
           </thead>
           <tbody className="divide-y divide-gray-200 bg-white">
             {paginatedData.map((obj, idx) => {
-              const url = getObjectUrl(host, obj.object_type, obj.object_id, obj.workspace_id);
+              const url = getObjectUrl(host, obj.object_type, obj.object_id);
 
               return (
                 <tr key={`${obj.object_type}-${obj.object_id}-${idx}`} className="hover:bg-gray-50">

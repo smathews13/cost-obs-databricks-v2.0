@@ -12,6 +12,15 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable, Generator
 
+from cachetools import TTLCache
+from databricks import sql
+from databricks.sdk import AccountClient, WorkspaceClient
+from databricks.sdk.service.sql import (
+    CreateWarehouseRequestWarehouseType,
+    SpotInstancePolicy,
+    State,
+)
+
 # Per-request user token set by UserAuthMiddleware when x-forwarded-access-token
 # is present (Databricks Apps user authorization preview). Empty string = use SP.
 _user_token: ContextVar[str] = ContextVar("_user_token", default="")
@@ -60,16 +69,6 @@ def set_auth_mode_override(mode: str) -> None:
             "Auth mode is permanently locked to 'sp'.", mode
         )
     # Always keep _auth_mode as "sp" — no mutation needed
-
-from cachetools import TTLCache
-from databricks import sql
-from databricks.sdk import AccountClient, WorkspaceClient
-from databricks.sdk.service.sql import (
-    CreateWarehouseRequestWarehouseType,
-    EndpointInfoWarehouseType,
-    SpotInstancePolicy,
-    State,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -1080,8 +1079,10 @@ def delta_cache_get(key: str) -> dict | None:
         cat, sch = get_catalog_schema()
         if not cat or not sch:
             return None
-        import threading, contextvars
-        from concurrent.futures import Future, wait as _cfwait
+        import contextvars
+        import threading
+        from concurrent.futures import Future
+        from concurrent.futures import wait as _cfwait
         ctx = contextvars.copy_context()
 
         def _run():
@@ -1118,7 +1119,8 @@ def delta_cache_get(key: str) -> dict | None:
             return None
         rows = future.result()
         if rows and rows[0].get("payload_json"):
-            import gzip, base64 as _b64
+            import base64 as _b64
+            import gzip
             result = json.loads(gzip.decompress(_b64.b64decode(rows[0]["payload_json"])).decode())
             _delta_l1[key] = result
             return result
@@ -1136,7 +1138,8 @@ def delta_cache_put(key: str, endpoint: str, payload: dict, ttl_seconds: int = 6
     _delta_l1[key] = payload  # L1 update is always immediate
 
     def _write(_key=key, _endpoint=endpoint, _payload=payload, _ttl=ttl_seconds):
-        import gzip, base64 as _b64
+        import base64 as _b64
+        import gzip
         compressed = _b64.b64encode(gzip.compress(json.dumps(_payload).encode())).decode("ascii")
 
         # L2 primary: Lakebase response_cache (fast upsert); warehouse fallback.
@@ -1400,7 +1403,7 @@ def ensure_dedicated_warehouse() -> tuple[str, str]:
         logger.info(f"  Name: {DEDICATED_WAREHOUSE_NAME}")
         logger.info(f"  ID: {warehouse_id}")
         logger.info(f"  Size: {DEDICATED_WAREHOUSE_SIZE}")
-        logger.info(f"  Type: Serverless")
+        logger.info("  Type: Serverless")
         logger.info(f"  Min Clusters: {DEDICATED_WAREHOUSE_MIN_CLUSTERS}")
         logger.info(f"  Max Clusters: {DEDICATED_WAREHOUSE_MAX_CLUSTERS}")
         logger.info(f"  Auto-Stop: {DEDICATED_WAREHOUSE_AUTO_STOP_MINS} minutes")
@@ -2025,7 +2028,6 @@ def lb_get_config(key: str) -> dict | str | None:
                 cur.execute("SELECT value FROM app_config WHERE key = %s", (key,))
                 row = cur.fetchone()
         if row:
-            import psycopg.types.json as _pj
             val = row[0]
             return val.obj if hasattr(val, "obj") else val
     except Exception as e:
@@ -2036,7 +2038,6 @@ def lb_get_config(key: str) -> dict | str | None:
 def lb_set_config(key: str, value: dict | str | list | None) -> None:
     """Upsert a config value into app_config. Best-effort, non-fatal."""
     try:
-        import psycopg.types.json as _pj
         with get_pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2069,7 +2070,7 @@ def lb_write_setup_complete() -> None:
     """Record setup_complete in Lakebase. Best-effort, non-fatal."""
     try:
         from datetime import datetime, timezone
-        import psycopg.types.json as _pj
+
         with get_pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2107,7 +2108,6 @@ def lb_read_build_state() -> dict | None:
 def lb_write_build_state(state: dict) -> None:
     """Append a build progress snapshot to Lakebase. Best-effort, non-fatal."""
     try:
-        import psycopg.types.json as _pj
         with get_pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -2198,7 +2198,8 @@ def execute_queries_parallel(
         Dictionary mapping query names to results
     """
     import threading
-    from concurrent.futures import Future, wait as _cfwait, ALL_COMPLETED
+    from concurrent.futures import ALL_COMPLETED, Future
+    from concurrent.futures import wait as _cfwait
 
     start_time = time.time()
     results: dict[str, list[dict[str, Any]] | None] = {}

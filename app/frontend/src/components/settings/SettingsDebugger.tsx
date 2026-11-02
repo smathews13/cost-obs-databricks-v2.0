@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { debuggerRunState } from "./debuggerState";
 
 interface InstallReport {
   version?: { commit_sha: string; branch?: string; repo?: string; commit_date?: string };
@@ -26,16 +27,6 @@ interface AuthStatusSlim {
   sp_user_name?: string;
   sp_client_id?: string;
   user_email?: string | null;
-}
-
-// Module-level so state survives tab switches (useState resets on unmount)
-let _persistedRunKey = 0;
-let _persistedHasRun = false;
-
-/** Reset persisted run state. Used only in tests to prevent cross-test pollution. */
-export function _resetDebuggerState() {
-  _persistedRunKey = 0;
-  _persistedHasRun = false;
 }
 
 interface DiagCheck {
@@ -265,8 +256,8 @@ interface SettingsDebuggerProps {
 }
 
 export function SettingsDebugger({ onGoToConfig }: SettingsDebuggerProps) {
-  const [runKey, setRunKey] = useState(_persistedRunKey);
-  const [hasRun, setHasRun] = useState(_persistedHasRun);
+  const [runKey, setRunKey] = useState(debuggerRunState.runKey);
+  const [hasRun, setHasRun] = useState(debuggerRunState.hasRun);
 
   const { data: installReport, isLoading: configLoading } = useQuery<InstallReport>({
     queryKey: ["settings-install-report"],
@@ -303,9 +294,9 @@ export function SettingsDebugger({ onGoToConfig }: SettingsDebuggerProps) {
   });
 
   const handleRun = () => {
-    const next = _persistedRunKey + 1;
-    _persistedRunKey = next;
-    _persistedHasRun = true;
+    const next = debuggerRunState.runKey + 1;
+    debuggerRunState.runKey = next;
+    debuggerRunState.hasRun = true;
     setRunKey(next);
     setHasRun(true);
   };

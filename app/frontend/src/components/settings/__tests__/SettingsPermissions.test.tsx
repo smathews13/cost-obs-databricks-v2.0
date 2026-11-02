@@ -35,17 +35,6 @@ const SP_AUTH_STATUS = {
   schema: "coc",
 };
 
-const USER_AUTH_STATUS = {
-  auth_mode: "user" as const,
-  identity: "user_oauth",
-  token_present: true,
-  user_email: "alice@databricks.com",
-  sp_client_id: "0000-aaaa-bbbb-1234",
-  sp_display_name: "cost-observer-app-sp",
-  catalog: "main",
-  schema: "coc",
-};
-
 function mockApis(authStatus: object, permissionsPayload?: object, userPermissions?: object) {
   const defaultUserPermissions = {
     admins: [],

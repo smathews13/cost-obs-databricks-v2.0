@@ -1,5 +1,6 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { ToastCtx } from "./toast";
 
 // DuBois product-UI tokens (spec §3). Scoped to the Settings modal only — the rest of
 // the app keeps its marketing-brand orange. Red means danger only; toggles are blue.
@@ -276,8 +277,6 @@ export function Callout({ tone, children }: { tone: "success" | "warning" | "dan
 }
 
 // ── Toast ────────────────────────────────────────────────────────────────────
-const ToastCtx = createContext<(msg: string) => void>(() => {});
-export const useToast = () => useContext(ToastCtx);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [msg, setMsg] = useState<string | null>(null);

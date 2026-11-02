@@ -179,7 +179,11 @@ AZURE_CONNECTIONS_FILE = os.path.join(SETTINGS_DIR, "azure_connections.json")
 # ── Delta table helpers (config tables that survive deploys) ──────────────────
 
 def _config_table(name: str) -> str:
-    from backend.db import get_catalog_schema, validate_app_storage_target, StorageConfigurationError
+    from backend.db import (
+        StorageConfigurationError,
+        get_catalog_schema,
+        validate_app_storage_target,
+    )
     catalog, schema = get_catalog_schema()
     try:
         validate_app_storage_target(catalog, schema)
@@ -272,7 +276,7 @@ def save_refresh_log_to_delta(log_data: dict) -> None:
 
     # Primary: Lakebase app_config KV
     try:
-        from backend.db import lb_set_config, lakebase_available
+        from backend.db import lakebase_available, lb_set_config
         if lakebase_available():
             lb_set_config("refresh_log", log_data)
             logger.info("Refresh log saved to Lakebase (status=%s)", log_data.get("status"))
@@ -681,6 +685,7 @@ _warehouse_cache: dict | None = None  # in-process cache; cleared on server rest
 async def get_app_config():
     """Return current app configuration. Warehouse name fetched from SDK; other fields are instant from env vars."""
     import asyncio as _asyncio
+
     from backend.db import get_catalog_schema
 
     # Warehouse: resolve ID from env vars, then look up name/state via SDK.
@@ -790,7 +795,7 @@ async def get_tables_status(request: Request, no_cache: bool = False):
 
 async def _get_tables_status_inner(request: Request):
     global _tables_cache, _tables_cache_ts
-    from backend.db import get_catalog_schema, execute_query, _user_token
+    from backend.db import _user_token, execute_query, get_catalog_schema
 
     # Read the raw forwarded token directly — _auth_mode may be locked to "sp"
     # (e.g. warehouse was cold on startup and the scope check failed), which forces
@@ -823,7 +828,6 @@ async def _get_tables_status_inner(request: Request):
     except Exception as e:
         return {"catalog": None, "schema": None, "tables": [], "error": str(e)}
 
-    from datetime import date
 
     # Tables that don't have a usage_date column — use an alternate date expression or skip date
     date_expr_overrides = {
@@ -872,7 +876,8 @@ async def _get_tables_status_inner(request: Request):
         # Use "TABLE_OR_VIEW_NOT_FOUND" and "table or view" as not-found signals;
         # do NOT use the generic "not found" which also matches COLUMN_NOT_FOUND
         # and would incorrectly mark an existing table with schema drift as absent.
-        _table_not_found = lambda e: ("TABLE_OR_VIEW_NOT_FOUND" in e or "table or view" in e.lower())
+        def _table_not_found(e: str) -> bool:
+            return "TABLE_OR_VIEW_NOT_FOUND" in e or "table or view" in e.lower()
         try:
             max_expr = date_expr_overrides.get(table_name, "MAX(usage_date)")
             min_expr = min_date_expr_overrides.get(table_name, "MIN(usage_date)")
@@ -985,7 +990,8 @@ async def _get_tables_status_inner(request: Request):
     try:
         with open(_log_path) as _f:
             _log = json.load(_f)
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
         _last = _dt.strptime(_log["last_refresh_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
         _hours = (_dt.now(_tz.utc) - _last).total_seconds() / 3600
         refresh_status = {
@@ -1208,7 +1214,7 @@ async def get_mv_sources_endpoint(detail: bool = False) -> dict:
     `detail=1` (used by the settings modal, not the top-nav filter) adds each
     source's `share_last_updated` via a DESCRIBE DETAIL probe — kept off the default
     path so the frequently-polled nav filter stays fast."""
-    from backend.db import get_mv_sources, get_local_source_label
+    from backend.db import get_local_source_label, get_mv_sources
     sources = get_mv_sources()
     if detail:
         def _enrich():
@@ -1258,8 +1264,8 @@ async def add_mv_source(request: Request, body: dict) -> dict:
 
     Not gated on the app admin role — registering a shared-view source only ever
     adds read-only data on top of this workspace's own, never replacing it."""
-    from backend.db import get_mv_sources, save_mv_sources, get_catalog_schema
-    from backend.materialized_views import rebuild_unified_views, _MV_TABLES
+    from backend.db import get_catalog_schema, get_mv_sources, save_mv_sources
+    from backend.materialized_views import _MV_TABLES, rebuild_unified_views
 
     label = (body.get("label") or "").strip()
     catalog = (body.get("catalog") or "").strip()
@@ -1322,8 +1328,10 @@ async def remove_mv_source(request: Request, label: str = None) -> dict:
 async def save_catalog_settings(body: dict):
     """Save catalog/schema override from the Setup Wizard."""
     import asyncio as _asyncio
+
     from fastapi import HTTPException
-    from backend.db import save_catalog_schema, StorageConfigurationError
+
+    from backend.db import StorageConfigurationError, save_catalog_schema
     catalog = (body.get("catalog") or "").strip()
     schema = (body.get("schema") or "").strip()
     if not catalog or not schema:
@@ -1394,8 +1402,9 @@ def _safe_resource_link(value: str) -> str:
 @router.get("/auth-status")
 async def get_auth_status_endpoint():
     """Return current auth mode for the settings UI indicator."""
-    import os as _os
     import asyncio as _asyncio
+    import os as _os
+
     from backend.db import get_auth_status, get_workspace_client
     status = get_auth_status()
     # Add SP identity and catalog/schema so the UI renders accurate GRANT SQL without placeholders
@@ -1927,6 +1936,7 @@ async def check_billing_access():
     Includes warehouse_id so the frontend can show the exact grant command.
     """
     import os as _os
+
     from backend.db import _user_token, execute_query
     tok = _user_token.set("")
     try:
@@ -2243,7 +2253,7 @@ def _load_webhook_settings() -> dict:
 def _save_webhook_to_table(settings: dict) -> None:
     """Persist webhook settings. Lakebase app_config primary; UC Delta dual-write."""
     try:
-        from backend.db import lb_set_config, lakebase_available
+        from backend.db import lakebase_available, lb_set_config
         if lakebase_available():
             lb_set_config("webhook_settings", {"slack_webhook_url": settings.get("slack_webhook_url") or ""})
     except Exception as e:
@@ -2506,7 +2516,7 @@ def _save_user_permissions_to_table(
     is never silently lost. Owner is persisted as role='owner' when supplied
     (or as the first admin when omitted).
     """
-    from backend.db import execute_write, clear_query_cache, lakebase_available, lakebase_execute
+    from backend.db import clear_query_cache, execute_write, lakebase_available, lakebase_execute
     pairs, normalized_admins, normalized_consumers, _normalized_owner = (
         _normalized_permission_rows(admins, consumers, owner=owner)
     )
@@ -2699,7 +2709,7 @@ _SCHEDULE_DEFAULTS: dict = {"enabled": True, "frequency": "nightly", "hour_utc":
 def _save_schedule_to_table(settings: dict) -> None:
     """Persist schedule settings. Lakebase app_config primary; UC Delta dual-write."""
     try:
-        from backend.db import lb_set_config, lakebase_available
+        from backend.db import lakebase_available, lb_set_config
         if lakebase_available():
             lb_set_config("schedule_settings", settings)
     except Exception as e:
@@ -2841,7 +2851,7 @@ def _load_alert_thresholds() -> dict:
 
 def _save_alert_thresholds(settings: dict) -> None:
     try:
-        from backend.db import lb_set_config, lakebase_available
+        from backend.db import lakebase_available, lb_set_config
         if lakebase_available():
             lb_set_config("alert_thresholds", settings)
     except Exception as e:
@@ -2967,7 +2977,7 @@ async def get_account_prices() -> dict[str, Any]:
 def _save_pricing_to_table(settings: dict) -> None:
     """Persist pricing settings. Lakebase app_config primary; UC Delta dual-write."""
     try:
-        from backend.db import lb_set_config, lakebase_available
+        from backend.db import lakebase_available, lb_set_config
         if lakebase_available():
             lb_set_config("pricing_settings", settings)
     except Exception as e:

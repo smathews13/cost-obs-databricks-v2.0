@@ -117,8 +117,8 @@ def _check_workspaces_table() -> dict:
 
 
 def _check_mv_existence() -> dict:
-    from backend.materialized_views import _MV_TABLES
     from backend.db import get_catalog_schema, get_workspace_client
+    from backend.materialized_views import _MV_TABLES
 
     catalog, schema = get_catalog_schema()
     try:
@@ -264,7 +264,7 @@ def _check_sp_identity() -> dict:
 
 def _check_warehouse_list_access() -> dict:
     """Check that at least one warehouse is visible to list_warehouses — the root cause of 'No warehouses found'."""
-    from backend.db import get_workspace_client, get_user_workspace_client
+    from backend.db import get_user_workspace_client, get_workspace_client
 
     http_path = os.getenv("DATABRICKS_HTTP_PATH", "")
     configured_id = http_path.split("/")[-1] if http_path and "/" in http_path else None
@@ -552,8 +552,10 @@ def _tab_sql() -> dict:
         if cnt1 == 0 and cnt2 == 0:
             return {"status": "warn", "detail": "No SQL attribution or per-query cost data in last 30 days — SQL tab charts will be empty", "root_cause": "No DBSQL warehouse usage or MV tables are empty", "fix": "Verify system.query.history access. SQL tab requires active DBSQL warehouse usage."}
         parts = []
-        if cnt1 > 0: parts.append(f"{cnt1:,} tool-attribution rows")
-        if cnt2 > 0: parts.append(f"{cnt2:,} per-query cost rows")
+        if cnt1 > 0:
+            parts.append(f"{cnt1:,} tool-attribution rows")
+        if cnt2 > 0:
+            parts.append(f"{cnt2:,} per-query cost rows")
         return {"status": "pass", "detail": ", ".join(parts) + " in last 30 days"}
     except Exception as e:
         err = str(e)
@@ -723,7 +725,8 @@ async def rebuild_mvs(background_tasks: BackgroundTasks, request: Request) -> di
     if await _get_user_role(user_email) != "admin":
         raise HTTPException(status_code=403, detail="Admin access required to rebuild materialized views")
 
-    from backend.db import _user_token as _db_user_token, get_catalog_schema
+    from backend.db import _user_token as _db_user_token
+    from backend.db import get_catalog_schema
     from backend.materialized_views import refresh_materialized_views
 
     catalog, schema = get_catalog_schema()

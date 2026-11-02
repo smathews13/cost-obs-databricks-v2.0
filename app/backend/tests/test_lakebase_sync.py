@@ -13,6 +13,7 @@ from backend.lakebase_sync import (
     GENERIC_KEY_SENTINEL,
     WORKSPACE_ID_SENTINEL,
     _is_not_owner_error,
+    _rows_to_tuples,
     build_add_column_sql,
     build_column_spec,
     build_create_table_sql,
@@ -22,9 +23,7 @@ from backend.lakebase_sync import (
     compute_reprocess_start,
     iter_date_chunks,
     map_delta_type_to_pg,
-    _rows_to_tuples,
 )
-
 
 # ── map_delta_type_to_pg ──────────────────────────────────────────────────────
 

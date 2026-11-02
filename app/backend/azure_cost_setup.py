@@ -311,7 +311,7 @@ def create_azure_tables(
         return results
 
     try:
-        logger.info(f"Creating bronze table...")
+        logger.info("Creating bronze table...")
         execute_query(CREATE_BRONZE_TABLE.format(catalog=catalog, schema=schema))
         results["actuals_bronze"] = "created"
     except Exception as e:
@@ -319,7 +319,7 @@ def create_azure_tables(
         results["actuals_bronze"] = f"error: {e}"
 
     try:
-        logger.info(f"Creating gold table...")
+        logger.info("Creating gold table...")
         execute_query(CREATE_GOLD_TABLE.format(catalog=catalog, schema=schema))
         results["actuals_gold"] = "created"
     except Exception as e:

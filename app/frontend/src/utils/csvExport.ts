@@ -1,4 +1,5 @@
 import type { ExportSections } from "@/components/ExportDialog";
+import type { DBSQLDashboardBundle } from "@/types/billing";
 
 function fmt(n: unknown, decimals = 2): string {
   return Number(n ?? 0).toFixed(decimals);
@@ -55,8 +56,31 @@ export interface WorkspaceFilter {
   names?: string[];
 }
 
+type ExportField =
+  | "total_dbus" | "total_spend" | "total_cost" | "workspace_count" | "category"
+  | "workspace_id" | "workspace_name" | "sku_name"
+  | "object_id" | "object_name" | "object_type" | "cluster_id" | "cluster_name"
+  | "user_email" | "user_name" | "run_as_user"
+  | "app_name" | "app_id" | "tag_key" | "tag_value";
+
+type ExportRow = { [K in ExportField]?: unknown };
+
+export interface CostExportData {
+  summary?: ExportRow | null;
+  products?: { products?: ExportRow[] | null } | null;
+  workspaces?: { workspaces?: ExportRow[] | null } | null;
+  skus?: { skus?: ExportRow[] | null } | null;
+  pipelineObjects?: { objects?: ExportRow[] | null } | null;
+  interactiveBreakdown?: { items?: ExportRow[] | null } | null;
+  query360?: DBSQLDashboardBundle | null;
+  aiml?: { categories?: { categories?: ExportRow[] | null } | null } | null;
+  apps?: { apps?: { apps?: ExportRow[] | null } | null } | null;
+  tagging?: { cost_by_tag?: { tags?: ExportRow[] | null } | null } | null;
+  users?: { top_users?: ExportRow[] | null } | null;
+}
+
 export function generateCostCSV(
-  data: any,
+  data: CostExportData,
   sections: ExportSections,
   dateRange: { start: string; end: string },
   workspaceFilter?: WorkspaceFilter
@@ -129,36 +153,36 @@ export function generateCostCSV(
 
   if (sections.query360 && data.query360) {
     const q = data.query360;
-    if (q.cost_by_source?.items?.length) {
+    if (q.by_source?.sources?.length) {
       sqlRows.push(row(headerCell("Query Cost by Source")));
       sqlRows.push(row(headerCell("Source"), headerCell("Total Spend ($)"), headerCell("Query Count")));
-      for (const s of q.cost_by_source.items) {
-        sqlRows.push(row(cell(s.source ?? s.query_source ?? ""), cell(fmt(s.total_cost ?? s.total_spend), "Number"), cell(s.query_count ?? 0, "Number")));
+      for (const s of q.by_source.sources) {
+        sqlRows.push(row(cell(s.query_source_type ?? ""), cell(fmt(s.total_spend), "Number"), cell(s.query_count ?? 0, "Number")));
       }
       sqlRows.push(row());
     }
-    if (q.cost_by_warehouse?.items?.length) {
+    if (q.by_warehouse?.warehouses?.length) {
       sqlRows.push(row(headerCell("Query Cost by Warehouse")));
       sqlRows.push(row(headerCell("Warehouse Name"), headerCell("Total Spend ($)"), headerCell("Query Count")));
-      for (const w of q.cost_by_warehouse.items) {
-        sqlRows.push(row(cell(w.warehouse_name ?? w.warehouse_id ?? ""), cell(fmt(w.total_cost ?? w.total_spend), "Number"), cell(w.query_count ?? 0, "Number")));
+      for (const w of q.by_warehouse.warehouses) {
+        sqlRows.push(row(cell(w.warehouse_name ?? w.warehouse_id ?? ""), cell(fmt(w.total_spend), "Number"), cell(w.query_count ?? 0, "Number")));
       }
       sqlRows.push(row());
     }
-    if (q.cost_by_user?.items?.length) {
+    if (q.by_user?.users?.length) {
       sqlRows.push(row(headerCell("Query Cost by User (Top 50)")));
       sqlRows.push(row(headerCell("User"), headerCell("Total Spend ($)"), headerCell("Query Count")));
-      for (const u of q.cost_by_user.items.slice(0, 50)) {
-        sqlRows.push(row(cell(u.user_email ?? u.user_name ?? u.run_as_user ?? ""), cell(fmt(u.total_cost ?? u.total_spend), "Number"), cell(u.query_count ?? 0, "Number")));
+      for (const u of q.by_user.users.slice(0, 50)) {
+        sqlRows.push(row(cell(u.executed_by ?? ""), cell(fmt(u.total_spend), "Number"), cell(u.query_count ?? 0, "Number")));
       }
       sqlRows.push(row());
     }
-    if (q.expensive_queries?.queries?.length) {
+    if (q.top_queries?.queries?.length) {
       sqlRows.push(row(headerCell("Most Expensive Queries (Top 50)")));
       sqlRows.push(row(headerCell("Query Text"), headerCell("Cost ($)"), headerCell("Duration (s)"), headerCell("Warehouse")));
-      for (const q2 of q.expensive_queries.queries.slice(0, 50)) {
-        const text = (q2.query_text || "").slice(0, 200);
-        sqlRows.push(row(cell(text), cell(fmt(q2.cost ?? q2.estimated_cost), "Number"), cell(fmt(q2.duration_ms ? q2.duration_ms / 1000 : 0), "Number"), cell(q2.warehouse_name ?? q2.warehouse_id ?? "")));
+      for (const q2 of q.top_queries.queries.slice(0, 50)) {
+        const text = (q2.statement_preview || "").slice(0, 200);
+        sqlRows.push(row(cell(text), cell(fmt(q2.cost), "Number"), cell(fmt(q2.duration_seconds ?? 0), "Number"), cell(q2.warehouse_id ?? "")));
       }
       sqlRows.push(row());
     }

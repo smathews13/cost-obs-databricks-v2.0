@@ -117,6 +117,7 @@ def run_alert_check(send: bool = True) -> dict:
     """Evaluate alerts and, when a Slack webhook is configured and `send`, post a digest.
     Returns the evaluation plus a `sent` flag. Never raises."""
     import httpx
+
     from backend.routers.settings import _load_webhook_settings
 
     result = evaluate_alerts()

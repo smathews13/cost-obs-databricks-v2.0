@@ -1,6 +1,7 @@
 export { SettingsConfig } from "./SettingsConfig";
-export { ReadinessChecks, normalizeReadinessResult } from "./ReadinessChecks";
-export type { ReadinessResult, ReadinessCheck, ReadinessWarehouse, ReadinessStatus } from "./ReadinessChecks";
+export { ReadinessChecks } from "./ReadinessChecks";
+export { normalizeReadinessResult } from "./readiness";
+export type { ReadinessResult, ReadinessCheck, ReadinessWarehouse, ReadinessStatus } from "./readiness";
 export { SettingsGeneral } from "./SettingsGeneral";
 export { SettingsTabs } from "./SettingsTabs";
 export { SettingsExperimental } from "./SettingsExperimental";

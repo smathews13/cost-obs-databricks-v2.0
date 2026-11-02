@@ -83,7 +83,7 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
     [workspaces],
   );
   const [selectedWorkspaces, setSelectedWorkspaces] = useState<string[]>([]);
-  const wsFilterInitialized = useRef(false);
+  const [wsFilterInitialized, setWsFilterInitialized] = useState(false);
   const [filteredData, setFilteredData] = useState<ProductBreakdownResponse | undefined>(undefined);
   const [filterLoading, setFilterLoading] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -91,13 +91,10 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Seed with all workspaces on first data load
-  useEffect(() => {
-    if (wsFilterInitialized.current) return;
-    if (allWsIds.length > 0) {
-      setSelectedWorkspaces(allWsIds);
-      wsFilterInitialized.current = true;
-    }
-  }, [allWsIds]);
+  if (!wsFilterInitialized && allWsIds.length > 0) {
+    setWsFilterInitialized(true);
+    setSelectedWorkspaces(allWsIds);
+  }
 
   const isAll = selectedWorkspaces.length === allWsIds.length && allWsIds.length > 0;
   const isPartial = selectedWorkspaces.length > 0 && selectedWorkspaces.length < allWsIds.length;
@@ -105,14 +102,23 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
 
   const wsKey = useMemo(() => [...selectedWorkspaces].sort().join(','), [selectedWorkspaces]);
 
-  useEffect(() => {
+  const filterKey = `${wsKey}|${dateRange?.startDate ?? ""}|${dateRange?.endDate ?? ""}|${isAll}|${isEmpty}`;
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (prevFilterKey !== filterKey) {
+    setPrevFilterKey(filterKey);
     if (isAll || isEmpty) {
       setFilteredData(undefined);
-      return;
+      setFilterLoading(false);
+    } else {
+      setFilterLoading(true);
     }
+  }
+
+  useEffect(() => {
+    if (isAll || isEmpty) return;
 
     let cancelled = false;
-    setFilterLoading(true);
+    const selectedIds = wsKey.split(",");
 
     const fetchOne = (wsId: string) => {
       const params = new URLSearchParams();
@@ -122,13 +128,13 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
       return fetch(`/api/billing/by-product?${params}`).then((r) => r.json());
     };
 
-    if (selectedWorkspaces.length === 1) {
-      fetchOne(selectedWorkspaces[0])
+    if (selectedIds.length === 1) {
+      fetchOne(selectedIds[0])
         .then((json) => { if (!cancelled) { setFilteredData(json); setFilterLoading(false); } })
         .catch(() => { if (!cancelled) setFilterLoading(false); });
     } else {
       // Merge per-workspace results by product category
-      Promise.all(selectedWorkspaces.map(fetchOne))
+      Promise.all(selectedIds.map(fetchOne))
         .then((results: ProductBreakdownResponse[]) => {
           if (cancelled) return;
           const merged: Record<string, { total_spend: number; total_dbus: number; workspace_count: number }> = {};
@@ -160,16 +166,14 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
     }
 
     return () => { cancelled = true; };
-  }, [wsKey, dateRange?.startDate, dateRange?.endDate, isAll, isEmpty, selectedWorkspaces]);
+  }, [wsKey, dateRange?.startDate, dateRange?.endDate, isAll, isEmpty]);
 
   // Close dropdown on outside click; reset search on close so reopening starts fresh
   useEffect(() => {
-    if (!dropdownOpen) {
-      setWsSearch("");
-      return;
-    }
+    if (!dropdownOpen) return;
     const handleClick = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setWsSearch("");
         setDropdownOpen(false);
       }
     };
@@ -177,11 +181,14 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
     return () => document.removeEventListener("mousedown", handleClick);
   }, [dropdownOpen]);
 
-  const displayData = isEmpty
-    ? ({ products: [], total_spend: 0, start_date: "", end_date: "" } as ProductBreakdownResponse)
-    : isAll
-    ? data
-    : filteredData;
+  const displayData = useMemo(
+    () => isEmpty
+      ? ({ products: [], total_spend: 0, start_date: "", end_date: "" } as ProductBreakdownResponse)
+      : isAll
+      ? data
+      : filteredData,
+    [isEmpty, isAll, data, filteredData],
+  );
   const showLoading = isLoading || filterLoading;
 
   const selectedWorkspaceName = useMemo(() => {
@@ -216,7 +223,7 @@ export const ProductBreakdown = memo(function ProductBreakdown({ data, isLoading
   const workspaceSelector = workspaces && workspaces.length > 1 ? (
     <div className="relative" ref={dropdownRef}>
       <button
-        onClick={() => setDropdownOpen(!dropdownOpen)}
+        onClick={() => { if (dropdownOpen) setWsSearch(""); setDropdownOpen(!dropdownOpen); }}
         className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${isPartial ? "border-lava text-lava" : "border-gray-300 text-gray-700 hover:bg-gray-50"}`}
       >
         {selectedWorkspaceName

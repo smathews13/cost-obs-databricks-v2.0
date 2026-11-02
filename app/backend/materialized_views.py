@@ -20,9 +20,9 @@ import tempfile
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import date
 
-from backend.db import execute_query, get_catalog_schema, get_connection
+from backend.db import execute_query, get_catalog_schema
 
 logger = logging.getLogger(__name__)
 
@@ -1034,7 +1034,12 @@ _TABLE_REFRESH_CONFIG: dict[str, dict] = {
     },
 }
 
-from backend.materialized_views_extra import EXTRA_TABLE_REFRESH, EXTRA_CREATE, EXTRA_MERGE
+from backend.materialized_views_extra import (  # noqa: E402 — imported late to avoid a circular import
+    EXTRA_CREATE,
+    EXTRA_MERGE,
+    EXTRA_TABLE_REFRESH,
+)
+
 _TABLE_REFRESH_CONFIG.update(EXTRA_TABLE_REFRESH)
 
 # Cloud invoice gold is only valid when CUR / Cost Management / GCP export
@@ -1744,7 +1749,7 @@ def _create_materialized_views_impl(catalog: str | None = None, schema: str | No
         schema = schema or sch
 
     # Hard safety gate — never touch forbidden or unconfigured locations
-    from backend.db import validate_app_storage_target, StorageConfigurationError
+    from backend.db import StorageConfigurationError, validate_app_storage_target
     try:
         validate_app_storage_target(catalog, schema)
     except StorageConfigurationError as e:
@@ -1828,17 +1833,17 @@ def _create_materialized_views_impl(catalog: str | None = None, schema: str | No
         err_str = str(e)
         err_lower = err_str.lower()
         if any(kw in err_lower for kw in ("insufficient_privileges", "does not have", "permission", "unauthorized", "error during request")):
-            from backend.db import get_workspace_client, _user_token
+            from backend.db import _user_token, get_workspace_client
             # Identify who actually ran the query so the error message is accurate
             running_as_user = bool(_user_token.get())
             try:
                 if running_as_user:
                     from backend.db import get_user_workspace_client
                     identity = get_user_workspace_client().current_user.me().user_name or "your user account"
-                    grant_note = f"As a metastore admin, run:"
+                    grant_note = "As a metastore admin, run:"
                 else:
                     identity = get_workspace_client().current_user.me().user_name or "<app-service-principal>"
-                    grant_note = f"A catalog owner or metastore admin must run:"
+                    grant_note = "A catalog owner or metastore admin must run:"
             except Exception:
                 identity = "your user account" if running_as_user else "<app-service-principal>"
                 grant_note = "A catalog owner or metastore admin must run:"
@@ -1865,9 +1870,8 @@ def _create_materialized_views_impl(catalog: str | None = None, schema: str | No
     extra_tables = list(EXTRA_CREATE.items())
 
     # Create all tables in parallel — none depend on each other
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _create_table(table_name: str, create_sql: str) -> tuple[str, str, float]:
         from datetime import timedelta as _td
@@ -2068,8 +2072,12 @@ def rebuild_unified_views(catalog: str | None = None, schema: str | None = None)
     tables. Returns a per-table build summary (used by the Settings UI).
     """
     from backend.db import (
-        execute_query, get_catalog_schema, get_mv_sources,
-        get_local_source_label, save_unified_view_tables, MV_UNIFIED_SUFFIX,
+        MV_UNIFIED_SUFFIX,
+        execute_query,
+        get_catalog_schema,
+        get_local_source_label,
+        get_mv_sources,
+        save_unified_view_tables,
     )
     if catalog is None or schema is None:
         c, s = get_catalog_schema()
@@ -2126,7 +2134,12 @@ def rebuild_unified_views(catalog: str | None = None, schema: str | None = None)
 
 def drop_unified_views(catalog: str | None = None, schema: str | None = None) -> None:
     """Drop every `<name>__unified` view so reads fall back to base tables."""
-    from backend.db import execute_query, get_catalog_schema, save_unified_view_tables, MV_UNIFIED_SUFFIX
+    from backend.db import (
+        MV_UNIFIED_SUFFIX,
+        execute_query,
+        get_catalog_schema,
+        save_unified_view_tables,
+    )
     # No unified views remain — stop apply_mv_overrides from remapping to them.
     save_unified_view_tables([])
     if catalog is None or schema is None:
@@ -2168,7 +2181,7 @@ def check_materialized_views_exist(catalog: str | None = None, schema: str | Non
     # their own tables), then fall back to the SP client. Never fall back to SQL — a
     # schema-not-found error from the UC API means the tables simply don't exist yet,
     # and SQL connections would hang for minutes against a warehouse the SP can't use.
-    from backend.db import get_workspace_client, get_user_workspace_client
+    from backend.db import get_user_workspace_client, get_workspace_client
     clients_to_try = []
     try:
         user_client = get_user_workspace_client()

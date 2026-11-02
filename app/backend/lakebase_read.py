@@ -1657,18 +1657,29 @@ def _registry() -> dict[str, tuple[str, str, list[str]]]:
     global _REGISTRY
     if _REGISTRY is None:
         from backend.materialized_views import (
-            MV_BILLING_BY_PRODUCT, MV_BILLING_BY_WORKSPACE, MV_BILLING_SUMMARY,
-            MV_BILLING_TIMESERIES, MV_ETL_BREAKDOWN, MV_PLATFORM_KPIS,
-            MV_SQL_TOOL_ATTRIBUTION, MV_TAG_STATS,
+            MV_BILLING_BY_PRODUCT,
+            MV_BILLING_BY_WORKSPACE,
+            MV_BILLING_SUMMARY,
+            MV_BILLING_TIMESERIES,
+            MV_ETL_BREAKDOWN,
+            MV_PLATFORM_KPIS,
+            MV_SQL_TOOL_ATTRIBUTION,
+            MV_TAG_STATS,
         )
         from backend.materialized_views_extra import (
-            MV_INTERACTIVE_BREAKDOWN, MV_PIPELINE_OBJECTS, MV_SKU_BREAKDOWN,
+            MV_INTERACTIVE_BREAKDOWN,
+            MV_PIPELINE_OBJECTS,
+            MV_SKU_BREAKDOWN,
             MV_TAGGING_COVERAGE,
         )
         from backend.queries import AVG_DAILY_QUERY_USERS_MV, AVG_DAILY_WORKSPACES
         from backend.routers.apps import (
-            MV_APPS_AVG_COST_PER_APP, MV_APPS_BY_APP_FULL, MV_APPS_BY_APP_SKU,
-            MV_APPS_FILTERED_AVG, MV_APPS_SUMMARY, MV_APPS_TIMESERIES,
+            MV_APPS_AVG_COST_PER_APP,
+            MV_APPS_BY_APP_FULL,
+            MV_APPS_BY_APP_SKU,
+            MV_APPS_FILTERED_AVG,
+            MV_APPS_SUMMARY,
+            MV_APPS_TIMESERIES,
         )
         _REGISTRY = {
             MV_BILLING_SUMMARY:     ("billing_summary",  PG_BILLING_SUMMARY,     []),
@@ -1868,7 +1879,7 @@ def _run_shadow(name: str, pg_sql: str, pg_params: dict, key_cols: list[str], de
     """Background: read Lakebase, compare to the served Delta rows, log the verdict."""
     try:
         from backend.db import lakebase_query
-        from backend.lakebase_parity import compare_result_sets, _write_parity_log
+        from backend.lakebase_parity import _write_parity_log, compare_result_sets
         lb_rows = lakebase_query(pg_sql, pg_params)
         report = compare_result_sets(delta_result, lb_rows, key_cols=key_cols)
         report["name"] = name

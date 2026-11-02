@@ -8,57 +8,27 @@ from datetime import date, timedelta
 from typing import Any
 
 from cachetools import TTLCache
-
 from fastapi import APIRouter, HTTPException, Query
 
-from backend.db import (
-    execute_query,
-    execute_queries_parallel,
-    get_catalog_schema,
-    get_host_url,
-    get_workspace_client,
-    bundle_cache_key,
-    delta_cache_get,
-    delta_cache_put,
-    apply_mv_overrides,
-    source_scope_unavailable,
-    SourceScopeUnsupportedError,
-)
 from backend import cache_ttls
-from backend.queries import (
-    ACCOUNT_INFO,
-    AWS_COST_ESTIMATE,
-    AWS_COST_TIMESERIES,
-    BILLING_BY_PRODUCT,
-    BILLING_BY_PRODUCT_FAST,
-    BILLING_BY_PRODUCT_WORKSPACE,
-    BILLING_BY_WORKSPACE,
-    BILLING_SUMMARY,
-    BILLING_TIMESERIES,
-    BILLING_TIMESERIES_FAST,
-    ETL_BREAKDOWN,
-    INFRA_COST_ESTIMATE,
-    INFRA_COST_TIMESERIES,
-    INTERACTIVE_BREAKDOWN,
-    PIPELINE_OBJECTS,
-    BILLING_KPIS_FAST,
-    AVG_DAILY_WORKSPACES,
-    AVG_DAILY_QUERY_USERS_MV,
-    STICKINESS_PCT_QH,
-    TOTAL_WORKSPACES_ALLTIME,
-    AVG_DAILY_MODELS,
-    LAKEFLOW_JOB_STATS,
-    PLATFORM_KPIS,
-    PLATFORM_KPIS_FAST,
-    SKU_BREAKDOWN,
-    SPEND_ANOMALIES,
-    SQL_TOOL_ATTRIBUTION,
-)
 from backend.cloud_pricing import (
+    get_cloud_display_name,
     get_instance_family,
     get_instance_pricing,
     get_pricing_disclaimer,
-    get_cloud_display_name,
+)
+from backend.db import (
+    SourceScopeUnsupportedError,
+    apply_mv_overrides,
+    bundle_cache_key,
+    delta_cache_get,
+    delta_cache_put,
+    execute_queries_parallel,
+    execute_query,
+    get_catalog_schema,
+    get_host_url,
+    get_workspace_client,
+    source_scope_unavailable,
 )
 from backend.materialized_views import (
     MV_BILLING_BY_PRODUCT,
@@ -74,6 +44,35 @@ from backend.materialized_views_extra import (
     MV_INTERACTIVE_BREAKDOWN,
     MV_PIPELINE_OBJECTS,
     MV_SKU_BREAKDOWN,
+)
+from backend.queries import (
+    ACCOUNT_INFO,
+    AVG_DAILY_MODELS,
+    AVG_DAILY_QUERY_USERS_MV,
+    AVG_DAILY_WORKSPACES,
+    AWS_COST_ESTIMATE,
+    AWS_COST_TIMESERIES,
+    BILLING_BY_PRODUCT,
+    BILLING_BY_PRODUCT_FAST,
+    BILLING_BY_PRODUCT_WORKSPACE,
+    BILLING_BY_WORKSPACE,
+    BILLING_KPIS_FAST,
+    BILLING_SUMMARY,
+    BILLING_TIMESERIES,
+    BILLING_TIMESERIES_FAST,
+    ETL_BREAKDOWN,
+    INFRA_COST_ESTIMATE,
+    INFRA_COST_TIMESERIES,
+    INTERACTIVE_BREAKDOWN,
+    LAKEFLOW_JOB_STATS,
+    PIPELINE_OBJECTS,
+    PLATFORM_KPIS,
+    PLATFORM_KPIS_FAST,
+    SKU_BREAKDOWN,
+    SPEND_ANOMALIES,
+    SQL_TOOL_ATTRIBUTION,
+    STICKINESS_PCT_QH,
+    TOTAL_WORKSPACES_ALLTIME,
 )
 
 router = APIRouter()
@@ -130,7 +129,8 @@ def _check_mv_available() -> bool:
         return _mv_cache["available"]
 
     import threading
-    from concurrent.futures import Future, wait as _cfwait
+    from concurrent.futures import Future
+    from concurrent.futures import wait as _cfwait
 
     def _check():
         catalog, schema = get_catalog_schema()
@@ -1023,7 +1023,12 @@ async def get_infra_bundle(
     _clusters_sql = _inject_ws_filter(INFRA_COST_ESTIMATE, _ws_clause)
     _ts_sql = _inject_ws_filter(INFRA_COST_TIMESERIES, _ws_clause)
     try:
-        from backend.lakebase_read import PG_INFRA_CLUSTERS, PG_INFRA_SUMMARY, PG_INFRA_TIMESERIES, gold_read
+        from backend.lakebase_read import (
+            PG_INFRA_CLUSTERS,
+            PG_INFRA_SUMMARY,
+            PG_INFRA_TIMESERIES,
+            gold_read,
+        )
         query_results = await asyncio.to_thread(execute_queries_parallel, [
             ("clusters", lambda: gold_read("infra_clusters", PG_INFRA_CLUSTERS, params, _ws_clause, _clusters_sql)),
             ("timeseries", lambda: gold_read("infra_timeseries", PG_INFRA_TIMESERIES, params, _ws_clause, _ts_sql)),
@@ -1151,8 +1156,10 @@ async def get_infra_bundle(
         err_cloud = "AWS"
         if host:
             h = host.lower()
-            if "azuredatabricks.net" in h: err_cloud = "AZURE"
-            elif "gcp.databricks.com" in h: err_cloud = "GCP"
+            if "azuredatabricks.net" in h:
+                err_cloud = "AZURE"
+            elif "gcp.databricks.com" in h:
+                err_cloud = "GCP"
         empty = {
             "cloud": err_cloud, "cloud_display_name": get_cloud_display_name(err_cloud),
             "start_date": params["start_date"], "end_date": params["end_date"],
@@ -1453,7 +1460,7 @@ async def get_dashboard_bundle(
     end_date: str = Query(default=None),
 ) -> dict[str, Any]:
     """Get all dashboard data in a single request with parallel execution.
-    
+
     This endpoint executes all dashboard queries in parallel to minimize latency.
     Expected speedup: 6-12x faster than making individual requests.
     """
@@ -2663,8 +2670,14 @@ async def get_kpis_bundle(
     anomalies_sql = SPEND_ANOMALIES
 
     from backend.lakebase_read import (
-        PG_AVG_DAILY_MODELS, PG_KPI_BILLING, PG_KPI_LAKEFLOW, PG_QUERY_USER_COUNT,
-        PG_SPEND_ANOMALIES, PG_STICKINESS, PG_TOTAL_WORKSPACES, gold_read,
+        PG_AVG_DAILY_MODELS,
+        PG_KPI_BILLING,
+        PG_KPI_LAKEFLOW,
+        PG_QUERY_USER_COUNT,
+        PG_SPEND_ANOMALIES,
+        PG_STICKINESS,
+        PG_TOTAL_WORKSPACES,
+        gold_read,
         warehouse_view_fallback,
     )
     billing_ws_clause = wf.build_ws_filter_clause(id_list=id_list, col="workspace_id")

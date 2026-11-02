@@ -2,29 +2,30 @@
 
 import asyncio
 import logging
+import threading as _threading
 import time as _time
 from datetime import date, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query
 
+from backend import cache_ttls
+from backend import workspace_filter as wf
 from backend.db import (
-    execute_query,
-    execute_queries_parallel,
+    apply_mv_overrides,
     bundle_cache_key,
     delta_cache_get,
     delta_cache_put,
-    get_workspace_client,
-    apply_mv_overrides,
+    execute_queries_parallel,
+    execute_query,
     get_catalog_schema,
+    get_workspace_client,
     local_source_is_selected,
     source_scope_unavailable,
 )
-from backend import workspace_filter as wf
-from backend import cache_ttls
 from backend.materialized_views import MV_TAG_STATS, MV_TAGGING_SUMMARY
 from backend.materialized_views_extra import MV_TAGGING_COVERAGE
-from backend.routers.billing import _check_mv_available, _exec_mv, get_default_end_date, get_default_start_date
+from backend.routers.billing import _check_mv_available, _exec_mv
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,7 +34,6 @@ logger = logging.getLogger(__name__)
 # Prevents every request from burning 45s waiting for a timeout when lakeflow is unavailable.
 # Circuit-breaker state is shared across worker threads — guard with a lock so we never
 # read a torn (available, last_failure) pair or flip-flop the flag on interleaved writes.
-import threading as _threading
 _lakeflow_lock = _threading.Lock()
 _lakeflow_available: bool = True
 _lakeflow_last_failure: float = 0.0
@@ -1300,8 +1300,13 @@ async def get_tagging_dashboard_bundle(
         return execute_query(fallback_sql, query_params)
 
     from backend.lakebase_read import (
-        PG_COST_BY_TAG, PG_COST_BY_TAG_KEY, PG_TAG_COVERAGE_TIMESERIES, PG_UNTAGGED,
-        dual_read, gold_read, warehouse_view_fallback,
+        PG_COST_BY_TAG,
+        PG_COST_BY_TAG_KEY,
+        PG_TAG_COVERAGE_TIMESERIES,
+        PG_UNTAGGED,
+        dual_read,
+        gold_read,
+        warehouse_view_fallback,
     )
     live_ok = warehouse_view_fallback()
     mv_ws_clause = wf.build_ws_filter_clause(col="workspace_id", id_list=id_list)

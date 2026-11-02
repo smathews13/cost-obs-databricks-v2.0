@@ -36,7 +36,7 @@ export function SummaryCards({ data, isLoading, startDate, endDate, workspaceIds
         queryKey: ["kpi-trend", kpi, startDate, endDate, "daily", wsKey],
         queryFn: async () => {
           const params = new URLSearchParams({ kpi, start_date: startDate, end_date: endDate, granularity: "daily" });
-          if (workspaceIds?.length) params.set("workspace_ids", workspaceIds.join(","));
+          if (wsKey) params.set("workspace_ids", wsKey);
           const res = await fetch(`/api/billing/kpi-trend?${params}`);
           if (!res.ok) throw new Error("prefetch failed");
           return res.json();

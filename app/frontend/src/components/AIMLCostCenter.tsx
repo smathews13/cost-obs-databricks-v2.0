@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { VirtualizedList } from "./VirtualizedList";
 import {
@@ -12,8 +12,9 @@ import {
   Pie,
   Cell,
   Legend,
+  type PieLabelRenderProps,
 } from "recharts";
-import type { AIMLDashboardBundle } from "@/types/billing";
+import type { AIMLAgentBrick, AIMLCluster, AIMLDashboardBundle } from "@/types/billing";
 import { KPITrendModal } from "./KPITrendModal";
 import { KPICard } from "@/components/ui/KPICard";
 import { formatIdentity, useSpNameMap } from "@/utils/identity";
@@ -47,6 +48,12 @@ const CATEGORY_COLORS: Record<string, string> = {
   "AI Search": C.s5,
   "Fine Tuning": C.s1,
 };
+type AgentBrickRow = AIMLAgentBrick & {
+  served_entity_name?: string | null;
+  billing_origin_product?: string | null;
+};
+type MLClusterRow = AIMLCluster & { workspace_id?: string | null };
+
 const FALLBACK_COLORS = [C.s2, C.s5, C.s3, C.s3, C.s4, C.s5, C.s1, C.lava, C.slate];
 const formatCurrency = (value: number) =>
   new Intl.NumberFormat("en-US", {
@@ -197,13 +204,11 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
   }, [availableEndpointWorkspaces]);
 
   useEffect(() => {
-    if (!endpointsWorkspaceDropdownOpen) {
-      setEndpointsWorkspaceSearch("");
-      return;
-    }
+    if (!endpointsWorkspaceDropdownOpen) return;
     const handleClick = (e: MouseEvent) => {
       if (endpointsWorkspaceFilterRef.current && !endpointsWorkspaceFilterRef.current.contains(e.target as Node)) {
         setEndpointsWorkspaceDropdownOpen(false);
+        setEndpointsWorkspaceSearch("");
       }
     };
     document.addEventListener("mousedown", handleClick);
@@ -291,9 +296,10 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
     return map;
   }, [data?.categories, data?.timeseries]);
 
+  const categoriesData = data?.categories;
   const pieData = useMemo(() => {
-    if (!data?.categories?.categories) return [];
-    return data.categories.categories.map((cat) => {
+    if (!categoriesData?.categories) return [];
+    return categoriesData.categories.map((cat) => {
       const name = cat.category.replace(/^FMAPI\s*-\s*/, "");
       return {
         name,
@@ -302,37 +308,40 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
         fill: categoryColorMap[name] || FALLBACK_COLORS[0],
       };
     });
-  }, [data?.categories, categoryColorMap]);
+  }, [categoriesData, categoryColorMap]);
 
+  const endpointsBundle = data?.endpoints;
   const endpointWorkspaceNames = useMemo(() => {
     const map: Record<string, string> = {};
-    for (const e of data?.endpoints?.endpoints || []) {
+    for (const e of endpointsBundle?.endpoints || []) {
       if (e.workspace_id && e.workspace_name) map[e.workspace_id] = e.workspace_name;
     }
     return map;
-  }, [data?.endpoints]);
+  }, [endpointsBundle]);
 
-  const resolveWsName = (wsId: string) =>
-    workspaceNameMap?.[wsId] || endpointWorkspaceNames[wsId] || `Workspace ${wsId}`;
+  const resolveWsName = useCallback(
+    (wsId: string) => workspaceNameMap?.[wsId] || endpointWorkspaceNames[wsId] || `Workspace ${wsId}`,
+    [workspaceNameMap, endpointWorkspaceNames],
+  );
 
   const endpointWorkspaces = useMemo(() => {
-    if (!data?.endpoints?.endpoints) return [];
+    if (!endpointsBundle?.endpoints) return [];
     const ids = new Set<string>();
-    for (const e of data.endpoints.endpoints) {
+    for (const e of endpointsBundle.endpoints) {
       if (e.workspace_id && e.endpoint_name && e.endpoint_name !== 'UNKNOWN') ids.add(e.workspace_id);
     }
     return Array.from(ids).sort((a, b) => resolveWsName(a).localeCompare(resolveWsName(b)));
-  }, [data?.endpoints, workspaceNameMap, endpointWorkspaceNames]);
+  }, [endpointsBundle, resolveWsName]);
 
   const endpointsWorkspaceFiltered = useMemo(() => {
-    if (!data?.endpoints?.endpoints) return [];
-    const rows = data.endpoints.endpoints.filter(e => e.endpoint_name && e.endpoint_name !== 'UNKNOWN');
+    if (!endpointsBundle?.endpoints) return [];
+    const rows = endpointsBundle.endpoints.filter(e => e.endpoint_name && e.endpoint_name !== 'UNKNOWN');
     // Empty selection (from Clear) is treated as "show all" so Clear doesn't
     // silently hide every endpoint. Only apply the workspace filter when there
     // is an actual partial selection.
     if (endpointsWorkspaceFilter.length === 0) return rows;
     return rows.filter(e => !!e.workspace_id && endpointsWorkspaceFilter.includes(e.workspace_id));
-  }, [data?.endpoints, endpointsWorkspaceFilter]);
+  }, [endpointsBundle, endpointsWorkspaceFilter]);
 
   const endpointCostTypes = useMemo(() => {
     return Array.from(new Set(endpointsWorkspaceFiltered.map(e => e.cost_type).filter(Boolean)));
@@ -354,16 +363,22 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
   }, [endpointsWorkspaceFiltered, endpointsCostTypeFilter]);
 
 
-  useEffect(() => { setEndpointsPage(1); }, [endpointsData.length]);
+  const [prevEndpointsCount, setPrevEndpointsCount] = useState(endpointsData.length);
+  if (prevEndpointsCount !== endpointsData.length) {
+    setPrevEndpointsCount(endpointsData.length);
+    setEndpointsPage(1);
+  }
 
   const endpointsWorkspaceFilterKey = useMemo(
     () => [...endpointsWorkspaceFilter].sort().join(','),
     [endpointsWorkspaceFilter],
   );
-  useEffect(() => {
+  const [prevEndpointsWorkspaceFilterKey, setPrevEndpointsWorkspaceFilterKey] = useState(endpointsWorkspaceFilterKey);
+  if (prevEndpointsWorkspaceFilterKey !== endpointsWorkspaceFilterKey) {
+    setPrevEndpointsWorkspaceFilterKey(endpointsWorkspaceFilterKey);
     setEndpointsCostTypeFilter(null);
     setEndpointsPage(1);
-  }, [endpointsWorkspaceFilterKey]);
+  }
 
   if (isLoading) {
     return (
@@ -474,7 +489,7 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
 
       {selectedKPI && startDate && endDate && (
         <KPITrendModal
-          kpi={selectedKPI.kpi as any}
+          kpi={selectedKPI.kpi}
           kpiLabel={selectedKPI.label}
           isOpen={!!selectedKPI}
           onClose={() => setSelectedKPI(null)}
@@ -534,7 +549,7 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
                   outerRadius={90}
                   paddingAngle={2}
                   dataKey="value"
-                  label={({ percentage }: any) => percentage >= 5 ? `${Math.round(percentage)}%` : ''}
+                  label={({ percentage }: PieLabelRenderProps & { percentage?: number }) => percentage != null && percentage >= 5 ? `${Math.round(percentage)}%` : ''}
                   labelLine={false}
                 >
                   {pieData.map((entry, index) => (
@@ -542,7 +557,7 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
                   ))}
                 </Pie>
                 <Tooltip formatter={(value) => formatCurrency(value as number)} />
-                <Legend wrapperStyle={{ fontSize: 12 }} formatter={(value, entry: any) => `${value} (${Math.round(entry.payload?.percentage ?? 0)}%)`} />
+                <Legend wrapperStyle={{ fontSize: 12 }} formatter={(value, entry) => `${value} (${Math.round((entry.payload as { percentage?: number } | undefined)?.percentage ?? 0)}%)`} />
               </PieChart>
             </ResponsiveContainer>
           ) : (
@@ -573,7 +588,7 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
                 return (
                 <div className="relative" ref={endpointsWorkspaceFilterRef}>
                   <button
-                    onClick={() => setEndpointsWorkspaceDropdownOpen(o => !o)}
+                    onClick={() => { setEndpointsWorkspaceSearch(""); setEndpointsWorkspaceDropdownOpen(o => !o); }}
                     className={`flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${isPartialWs ? "border-[#FF3621] text-[#FF3621]" : "border-gray-300 text-gray-700 hover:bg-gray-50"}`}
                   >
                     {singleName
@@ -967,7 +982,7 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
                     </thead>
                     <tbody className="divide-y divide-gray-200 bg-white">
                       {paginatedMlClusters.map((cluster, idx) => {
-                        const clusterUrl = getClusterUrl(host, cluster.cluster_id, (cluster as any).workspace_id);
+                        const clusterUrl = getClusterUrl(host, cluster.cluster_id, (cluster as MLClusterRow).workspace_id ?? null);
                         return (
                           <tr key={idx} className={idx % 2 === 0 ? "bg-white hover:bg-gray-50" : "bg-gray-50 hover:bg-gray-100"}>
                             <td className="px-4 py-4 text-sm">
@@ -1030,13 +1045,13 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
       {/* Agent Bricks Table */}
       <div className="rounded-lg bg-white p-6 border " style={{ borderColor: '#E5E5E5' }}>
         {(() => {
-          const allAgents = data.agent_bricks?.agents || [];
+          const allAgents: AgentBrickRow[] = data.agent_bricks?.agents || [];
           const isHistoricalAgent = (a: typeof allAgents[0]) => a.agent_name === "Unknown" || a.agent_name === a.endpoint_id;
           const historicalAgentCount = allAgents.filter(isHistoricalAgent).length;
-          const agentTypes = Array.from(new Set(allAgents.map(a => (a as any).agent_type || "Agent")));
+          const agentTypes = Array.from(new Set(allAgents.map(a => a.agent_type || "Agent")));
           const filteredAgents = allAgents
             .filter(a => showHistoricalAgents || !isHistoricalAgent(a))
-            .filter(a => agentTypeFilter.length === 0 || agentTypeFilter.includes((a as any).agent_type || "Agent"))
+            .filter(a => agentTypeFilter.length === 0 || agentTypeFilter.includes(a.agent_type || "Agent"))
             .filter(a => !agentSearch || (a.agent_name || "").toLowerCase().includes(agentSearch.toLowerCase()) || (a.endpoint_id || "").toLowerCase().includes(agentSearch.toLowerCase()));
           const agentTotalPages = Math.ceil(filteredAgents.length / PAGE_SIZE);
           const agentStart = (agentsPage - 1) * PAGE_SIZE;
@@ -1154,15 +1169,15 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
                                     {isHistoricalAgent(agent) && (
                                       <span className="inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">Historical</span>
                                     )}
-                                    {(agent as any).served_entity_name && (
-                                      <span className="max-w-[200px] truncate text-xs text-gray-500">{(agent as any).served_entity_name}</span>
+                                    {agent.served_entity_name && (
+                                      <span className="max-w-[200px] truncate text-xs text-gray-500">{agent.served_entity_name}</span>
                                     )}
                                   </div>
                                 </div>
                               </td>
                               <td className="whitespace-nowrap px-4 py-4 text-sm text-gray-600">
                                 {(() => {
-                                  const t = (agent as any).agent_type || "Agent";
+                                  const t = agent.agent_type || "Agent";
                                   const cls: Record<string, string> = {
                                     "Knowledge Assistant": "bg-cyan-50 text-cyan-700",
                                     "Supervisor Agent": "bg-amber-50 text-amber-700",
@@ -1215,16 +1230,16 @@ export function AIMLCostCenter({ data, isLoading, startDate, endDate, host, work
                                       <p className="text-lg font-semibold text-gray-900">{agent.workspace_count}</p>
                                     </div>
                                   </div>
-                                  {((agent as any).served_entity_name || (agent as any).billing_origin_product) && (
+                                  {(agent.served_entity_name || agent.billing_origin_product) && (
                                     <div className="mt-3 flex flex-wrap gap-2">
-                                      {(agent as any).served_entity_name && (
+                                      {agent.served_entity_name && (
                                         <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs text-gray-600">
-                                          <span className="font-medium">Model:</span> {(agent as any).served_entity_name}
+                                          <span className="font-medium">Model:</span> {agent.served_entity_name}
                                         </span>
                                       )}
-                                      {(agent as any).billing_origin_product && (
+                                      {agent.billing_origin_product && (
                                         <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2.5 py-0.5 text-xs text-gray-600">
-                                          <span className="font-medium">Product:</span> {(agent as any).billing_origin_product}
+                                          <span className="font-medium">Product:</span> {agent.billing_origin_product}
                                         </span>
                                       )}
                                     </div>

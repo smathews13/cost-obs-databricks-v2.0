@@ -262,7 +262,11 @@ async def get_azure_costs_by_charge_type(
     query = AZURE_COSTS_BY_CHARGE_TYPE.format(catalog=catalog, schema=schema)
 
     def _azure_charge():
-        from backend.lakebase_read import PG_AZURE_BY_CHARGE_TYPE, gold_read, warehouse_view_fallback
+        from backend.lakebase_read import (
+            PG_AZURE_BY_CHARGE_TYPE,
+            gold_read,
+            warehouse_view_fallback,
+        )
         return gold_read(
             "azure_by_charge_type", PG_AZURE_BY_CHARGE_TYPE, qparams, "",
             query if warehouse_view_fallback() else None,

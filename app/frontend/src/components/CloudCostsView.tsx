@@ -117,6 +117,16 @@ function getClusterUrl(host: string | null | undefined, clusterId: string | null
   return workspaceUrl(host, `/compute/interactive${workspaceParam}`);
 }
 
+function getInstanceFamily(instanceType: string | null | undefined): string {
+  if (!instanceType) return 'unknown';
+  if (instanceType.startsWith('Standard_')) {
+    const m = instanceType.match(/^(Standard_[A-Z]+)/);
+    return m ? m[1] : 'unknown';
+  }
+  const dotIdx = instanceType.indexOf('.');
+  return dotIdx > 0 ? instanceType.slice(0, dotIdx) : instanceType;
+}
+
 function getInstancePricingUrl(instanceType: string | null, isAzure: boolean = false): string {
   if (isAzure) {
     if (!instanceType) return "https://azure.microsoft.com/en-us/pricing/details/virtual-machines/linux/";
@@ -185,7 +195,11 @@ export function CloudCostsView({
   const [showHistoricalClusters, setShowHistoricalClusters] = useState(false);
   const [selectedKPI, setSelectedKPI] = useState<{kpi: string; label: string} | null>(null);
   const [selectedFamilies, setSelectedFamilies] = useState<Set<string>>(new Set());
-  useEffect(() => { setCurrentPage(1); }, [selectedFamilies]);
+  const [prevSelectedFamilies, setPrevSelectedFamilies] = useState(selectedFamilies);
+  if (prevSelectedFamilies !== selectedFamilies) {
+    setPrevSelectedFamilies(selectedFamilies);
+    setCurrentPage(1);
+  }
   const [tableFamily, setTableFamily] = useState<string[]>([]);
   const tableFamilySeen = useRef<Set<string>>(new Set());
   const [tableWorkspace, setTableWorkspace] = useState<string[]>([]);
@@ -259,7 +273,7 @@ export function CloudCostsView({
         queryKey: ["kpi-trend", kpi, startDate, endDate, "daily", wsKey],
         queryFn: async () => {
           const params = new URLSearchParams({ kpi, start_date: startDate, end_date: endDate, granularity: "daily" });
-          if (workspaceIds?.length) params.set("workspace_ids", workspaceIds.join(","));
+          if (wsKey) params.set("workspace_ids", wsKey);
           const res = await fetch(`/api/billing/kpi-trend?${params}`);
           if (!res.ok) throw new Error("prefetch failed");
           return res.json();
@@ -333,7 +347,7 @@ export function CloudCostsView({
     }
   };
 
-  const SortIcon = ({ field }: { field: SortField }) => {
+  const sortIcon = (field: SortField) => {
     if (sortField !== field) {
       return <span className="ml-1 text-gray-300">↕</span>;
     }
@@ -345,6 +359,112 @@ export function CloudCostsView({
     activeActualCloud === "GCP"   ? gcpActualLoading :
     actualLoading
   ));
+
+  const billingSummary: InfraBillingSummary | undefined = infraData?.billing_summary;
+
+  const cloudSummary = useMemo(() => {
+    if (!data?.clusters) return { totalCost: 0, totalDBUHours: 0, avgActiveClustersPerDay: 0, avgCostPerCluster: 0 };
+    const bs = billingSummary;
+    const totalDBUHours = data.clusters.reduce((sum, c) => sum + (c.total_dbu_hours || 0), 0);
+    const clustersWithTypes = data.clusters.filter(c => c.driver_instance_type || c.worker_instance_type);
+    const estimatedTotal = clustersWithTypes.reduce((sum, c) => sum + (c.estimated_aws_cost || 0), 0);
+
+    const avgCostPerCluster = bs?.avg_cost_per_cluster || (() => {
+      const tsPoints = infraTimeseriesData?.timeseries || [];
+      const activeTsPoints = tsPoints.filter(p => (p["Infrastructure Cost"] || 0) > 0);
+      if (activeTsPoints.length > 0) {
+        const tsTotal = activeTsPoints.reduce((s, p) => s + (p["Infrastructure Cost"] || 0), 0);
+        return tsTotal / activeTsPoints.length;
+      }
+      return 0;
+    })();
+
+    if (bs && bs.total_cost != null && bs.total_cost > 0) {
+      return {
+        totalCost: bs.total_cost,
+        totalDBUHours,
+        avgActiveClustersPerDay: bs.avg_clusters_per_day ?? 0,
+        avgCostPerCluster,
+      };
+    }
+
+    return { totalCost: estimatedTotal, totalDBUHours, avgActiveClustersPerDay: clustersWithTypes.length, avgCostPerCluster };
+  }, [data, infraTimeseriesData, billingSummary]);
+
+  const allClusters = data?.clusters;
+  const filteredClusters = useMemo(
+    () => {
+      const clusters = allClusters ?? [];
+      return showHistoricalClusters ? clusters : clusters.filter(c => c.driver_instance_type || c.worker_instance_type);
+    },
+    [allClusters, showHistoricalClusters],
+  );
+
+  const familyFilteredClusters = useMemo(
+    () => selectedFamilies.size === 0
+      ? filteredClusters
+      : filteredClusters.filter(c => {
+          const df = getInstanceFamily(c.driver_instance_type);
+          const wf = getInstanceFamily(c.worker_instance_type);
+          return selectedFamilies.has(df) || selectedFamilies.has(wf);
+        }),
+    [filteredClusters, selectedFamilies],
+  );
+
+  const instanceFamilies = data?.instance_families;
+  const availableTableFamilies = useMemo(() => {
+    const families = new Set<string>();
+    (instanceFamilies || []).forEach(f => {
+      if (f.instance_family && f.instance_family !== 'unknown') families.add(f.instance_family);
+    });
+    return [...families].sort();
+  }, [instanceFamilies]);
+
+  useEffect(() => {
+    const seen = tableFamilySeen.current;
+    const fresh = availableTableFamilies.filter(x => !seen.has(x));
+    if (fresh.length === 0) return;
+    setTableFamily(prev => Array.from(new Set([...prev, ...fresh])));
+    fresh.forEach(x => seen.add(x));
+  }, [availableTableFamilies]);
+
+  const availableTableWorkspaces = useMemo(() => {
+    const ws = new Set<string>();
+    familyFilteredClusters.forEach(c => { if (c.workspace_id) ws.add(c.workspace_id); });
+    return [...ws].sort();
+  }, [familyFilteredClusters]);
+
+  // Fallback name lookup from cluster rows (populated via backend LEFT JOIN on
+  // system.access.workspaces_latest). Used when workspaceNameMap is missing an id.
+  const clusterWorkspaceNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const c of familyFilteredClusters) {
+      const wsId = c.workspace_id;
+      const wsName = c.workspace_name;
+      if (wsId && wsName && !map[wsId]) map[wsId] = wsName;
+    }
+    return map;
+  }, [familyFilteredClusters]);
+
+  useEffect(() => {
+    const seen = tableWorkspaceSeen.current;
+    const fresh = availableTableWorkspaces.filter(x => !seen.has(x));
+    if (fresh.length === 0) return;
+    setTableWorkspace(prev => Array.from(new Set([...prev, ...fresh])));
+    fresh.forEach(x => seen.add(x));
+  }, [availableTableWorkspaces]);
+
+  const filteredTimeseriesData = useMemo(() => {
+    if (!timeseriesData?.timeseries) return null;
+    if (selectedFamilies.size === 0) return timeseriesData.timeseries;
+    return timeseriesData.timeseries.map((point) => {
+      let filteredCost = 0;
+      for (const family of selectedFamilies) {
+        filteredCost += (point[family] as number) || 0;
+      }
+      return { ...point, "AWS Cost": filteredCost };
+    });
+  }, [timeseriesData, selectedFamilies]);
 
   if (showLoading) {
     return (
@@ -562,8 +682,6 @@ export function CloudCostsView({
     </div>
   ) : null;
 
-  const billingSummary: InfraBillingSummary | undefined = infraData?.billing_summary;
-
   if (data?.error) {
     return (
       <div className="space-y-6">
@@ -615,107 +733,11 @@ export function CloudCostsView({
     );
   }
 
-  function getInstanceFamily(instanceType: string | null | undefined): string {
-    if (!instanceType) return 'unknown';
-    if (instanceType.startsWith('Standard_')) {
-      const m = instanceType.match(/^(Standard_[A-Z]+)/);
-      return m ? m[1] : 'unknown';
-    }
-    const dotIdx = instanceType.indexOf('.');
-    return dotIdx > 0 ? instanceType.slice(0, dotIdx) : instanceType;
-  }
-
-  const cloudSummary = useMemo(() => {
-    if (!data) return { totalCost: 0, totalDBUHours: 0, avgActiveClustersPerDay: 0, avgCostPerCluster: 0 };
-    const bs = billingSummary;
-    const totalDBUHours = data.clusters.reduce((sum, c) => sum + (c.total_dbu_hours || 0), 0);
-    const clustersWithTypes = data.clusters.filter(c => c.driver_instance_type || c.worker_instance_type);
-    const estimatedTotal = clustersWithTypes.reduce((sum, c) => sum + (c.estimated_aws_cost || 0), 0);
-
-    const avgCostPerCluster = bs?.avg_cost_per_cluster || (() => {
-      const tsPoints = infraTimeseriesData?.timeseries || [];
-      const activeTsPoints = tsPoints.filter(p => (p["Infrastructure Cost"] || 0) > 0);
-      if (activeTsPoints.length > 0) {
-        const tsTotal = activeTsPoints.reduce((s, p) => s + (p["Infrastructure Cost"] || 0), 0);
-        return tsTotal / activeTsPoints.length;
-      }
-      return 0;
-    })();
-
-    if (bs && bs.total_cost != null && bs.total_cost > 0) {
-      return {
-        totalCost: bs.total_cost,
-        totalDBUHours,
-        avgActiveClustersPerDay: bs.avg_clusters_per_day ?? 0,
-        avgCostPerCluster,
-      };
-    }
-
-    return { totalCost: estimatedTotal, totalDBUHours, avgActiveClustersPerDay: clustersWithTypes.length, avgCostPerCluster };
-  }, [data, infraTimeseriesData, billingSummary]);
-
   const historicalClusterCount = data.clusters.filter(c => !c.driver_instance_type && !c.worker_instance_type).length;
-
-  const filteredClusters = useMemo(
-    () => showHistoricalClusters ? data.clusters : data.clusters.filter(c => c.driver_instance_type || c.worker_instance_type),
-    [data.clusters, showHistoricalClusters],
-  );
-
-  const familyFilteredClusters = useMemo(
-    () => selectedFamilies.size === 0
-      ? filteredClusters
-      : filteredClusters.filter(c => {
-          const df = getInstanceFamily(c.driver_instance_type);
-          const wf = getInstanceFamily(c.worker_instance_type);
-          return selectedFamilies.has(df) || selectedFamilies.has(wf);
-        }),
-    [filteredClusters, selectedFamilies],
-  );
-
-  const availableTableFamilies = useMemo(() => {
-    const families = new Set<string>();
-    (data.instance_families || []).forEach(f => {
-      if (f.instance_family && f.instance_family !== 'unknown') families.add(f.instance_family);
-    });
-    return [...families].sort();
-  }, [data.instance_families]);
-
-  useEffect(() => {
-    const seen = tableFamilySeen.current;
-    const fresh = availableTableFamilies.filter(x => !seen.has(x));
-    if (fresh.length === 0) return;
-    setTableFamily(prev => Array.from(new Set([...prev, ...fresh])));
-    fresh.forEach(x => seen.add(x));
-  }, [availableTableFamilies]);
 
   const isTableFamilyFilterActive = tableFamily.length > 0 && tableFamily.length < availableTableFamilies.length;
 
-  const availableTableWorkspaces = useMemo(() => {
-    const ws = new Set<string>();
-    familyFilteredClusters.forEach(c => { if (c.workspace_id) ws.add(c.workspace_id); });
-    return [...ws].sort();
-  }, [familyFilteredClusters]);
-
-  // Fallback name lookup from cluster rows (populated via backend LEFT JOIN on
-  // system.access.workspaces_latest). Used when workspaceNameMap is missing an id.
-  const clusterWorkspaceNames = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const c of familyFilteredClusters) {
-      const wsId = c.workspace_id;
-      const wsName = (c as any).workspace_name;
-      if (wsId && wsName && !map[wsId]) map[wsId] = wsName;
-    }
-    return map;
-  }, [familyFilteredClusters]);
   const resolveWsName = (id: string) => workspaceNameMap?.[id] || clusterWorkspaceNames[id] || id;
-
-  useEffect(() => {
-    const seen = tableWorkspaceSeen.current;
-    const fresh = availableTableWorkspaces.filter(x => !seen.has(x));
-    if (fresh.length === 0) return;
-    setTableWorkspace(prev => Array.from(new Set([...prev, ...fresh])));
-    fresh.forEach(x => seen.add(x));
-  }, [availableTableWorkspaces]);
 
   const isTableWorkspaceFilterActive = tableWorkspace.length > 0 && tableWorkspace.length < availableTableWorkspaces.length;
 
@@ -759,19 +781,7 @@ export function CloudCostsView({
       value: f.total_dbu_hours,
     }));
 
-  const timeseriesFamilies: string[] = (timeseriesData as any)?.instance_families || [];
-
-  const filteredTimeseriesData = useMemo(() => {
-    if (!timeseriesData?.timeseries) return null;
-    if (selectedFamilies.size === 0) return timeseriesData.timeseries;
-    return timeseriesData.timeseries.map((point) => {
-      let filteredCost = 0;
-      for (const family of selectedFamilies) {
-        filteredCost += (point[family] as number) || 0;
-      }
-      return { ...point, "AWS Cost": filteredCost };
-    });
-  }, [timeseriesData, selectedFamilies]);
+  const timeseriesFamilies: string[] = (timeseriesData as (TimeseriesResponse & { instance_families?: string[] }) | undefined)?.instance_families || [];
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -875,7 +885,7 @@ export function CloudCostsView({
 
       {selectedKPI && startDate && endDate && (
         <KPITrendModal
-          kpi={selectedKPI.kpi as any}
+          kpi={selectedKPI.kpi}
           kpiLabel={selectedKPI.label}
           isOpen={!!selectedKPI}
           onClose={() => setSelectedKPI(null)}
@@ -1164,13 +1174,13 @@ export function CloudCostsView({
             <thead className="bg-gray-50">
               <tr>
                 <th className="cursor-pointer px-3 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => handleSort("cluster_name")}>
-                  Cluster <SortIcon field="cluster_name" />
+                  Cluster {sortIcon("cluster_name")}
                 </th>
                 <th className="w-44 px-3 py-3 text-left text-xs font-medium uppercase tracking-wider text-gray-500">Instance Types</th>
                 <th className="w-28 px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">
                   <div className="flex items-center justify-end gap-1">
                     <span className="cursor-pointer hover:text-gray-700" onClick={() => handleSort("estimated_aws_cost")}>
-                      Cost <SortIcon field="estimated_aws_cost" />
+                      Cost {sortIcon("estimated_aws_cost")}
                     </span>
                     <div className="group relative">
                       <svg className="h-3.5 w-3.5 cursor-help text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1189,10 +1199,10 @@ export function CloudCostsView({
                   </div>
                 </th>
                 <th className="w-28 cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => handleSort("total_dbu_hours")}>
-                  DBU Hours <SortIcon field="total_dbu_hours" />
+                  DBU Hours {sortIcon("total_dbu_hours")}
                 </th>
                 <th className="w-16 cursor-pointer px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500 hover:text-gray-700" onClick={() => handleSort("days_active")}>
-                  Days <SortIcon field="days_active" />
+                  Days {sortIcon("days_active")}
                 </th>
                 <th className="w-14 px-3 py-3 text-right text-xs font-medium uppercase tracking-wider text-gray-500">%</th>
               </tr>

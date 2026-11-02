@@ -164,11 +164,9 @@ function CreateUseCaseModal({ isOpen, onClose, existingTags }: CreateUseCaseModa
   });
 
   // Auto-populate owner with current user's email when modal opens
-  useEffect(() => {
-    if (isOpen && currentUser?.email && !owner) {
-      setOwner(currentUser.email);
-    }
-  }, [isOpen, currentUser?.email, owner]);
+  if (isOpen && currentUser?.email && !owner) {
+    setOwner(currentUser.email);
+  }
 
   // Fetch available objects for the object picker
   const { data: availableObjects, isLoading: objectsLoading } = useQuery<AvailableObjectsResponse>({
