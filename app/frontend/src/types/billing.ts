@@ -712,11 +712,16 @@ export interface AppsApp {
   total_spend: number;
   workspace_count: number;
   workspace_id?: string | null;
+  /** Workspace ids the app was billed to in the window. */
   workspace_names?: string[];
   days_active: number;
   last_usage_date: string | null;
   percentage: number;
   is_registered: boolean;
+  /** Billed to a workspace other than the one this app runs in, so not in its Apps registry. */
+  deployed_elsewhere?: boolean;
+  /** Unregistered and billed only to this app's own workspace: deleted. */
+  historical?: boolean;
   sku_breakdown?: AppsSkuBreakdown[];
 }
 

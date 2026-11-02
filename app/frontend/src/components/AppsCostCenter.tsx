@@ -18,6 +18,7 @@ import { KPITrendModal } from "./KPITrendModal";
 import { KPICard } from "@/components/ui/KPICard";
 import { VirtualizedList } from "./VirtualizedList";
 import { formatIdentity } from "@/utils/identity";
+import { appIconSize } from "@/utils/appTiles";
 import { C } from "@/theme";
 import { PageHero, Chip, InfoPanel } from "@/components/brand";
 
@@ -502,10 +503,10 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
     fresh.forEach(id => seen.add(id));
   }, [availableWorkspaces]);
 
-  // Selected workspaces as names (workspace_names on apps contains names, not IDs)
-  const selectedWorkspaceNames = useMemo(() => {
+  // workspace_names on apps holds workspace ids; older payloads held names.
+  const selectedWorkspaceKeys = useMemo(() => {
     const byId = new Map(availableWorkspaces.map(ws => [ws.id, ws.name]));
-    return new Set(selectedWorkspaces.map(id => byId.get(id) ?? id));
+    return new Set(selectedWorkspaces.flatMap(id => [id, byId.get(id) ?? id]));
   }, [selectedWorkspaces, availableWorkspaces]);
 
   // Filter apps by search query and workspace
@@ -523,19 +524,26 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
       ? data.apps.apps
       : data.apps.apps.filter(a =>
           !a.workspace_names?.length
-          || a.workspace_names.some(ws => selectedWorkspaceNames.has(ws))
+          || a.workspace_names.some(ws => selectedWorkspaceKeys.has(ws))
         );
     if (!searchQuery.trim()) return apps;
     const q = searchQuery.toLowerCase();
     return apps.filter(
       (a) => a.app_name.toLowerCase().includes(q) || a.app_id.toLowerCase().includes(q)
     );
-  }, [data?.apps, searchQuery, selectedWorkspaces.length, selectedWorkspaceNames, availableWorkspaces.length]);
+  }, [data?.apps, searchQuery, selectedWorkspaces.length, selectedWorkspaceKeys, availableWorkspaces.length]);
 
   // Reset to page 1 whenever filters change
   useEffect(() => {
     setAppsPage(1);
   }, [searchQuery, selectedWorkspaces]);
+
+  // Tiles aren't always in spend order (idle registry apps come first), so scale
+  // against the largest spend shown rather than the first tile.
+  const maxTileSpend = useMemo(
+    () => filteredApps.reduce((m, a) => Math.max(m, Number(a.total_spend) || 0), 0),
+    [filteredApps],
+  );
 
   const totalAppsPages = Math.ceil(filteredApps.length / APPS_PAGE_SIZE);
   const effectiveAppsPage = Math.min(appsPage, Math.max(1, totalAppsPages));
@@ -633,7 +641,7 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
 
   /** Backend deployment page in the Databricks workspace. */
   const deploymentUrl = (app: AppsApp) =>
-    hostBase ? `${hostBase}/apps/${app.app_name}` : null;
+    hostBase && !app.deployed_elsewhere ? `${hostBase}/apps/${app.app_name}` : null;
 
   return (
     <div className="animate-fade-in space-y-6">
@@ -1111,7 +1119,9 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
             <div className="mt-3 flex items-center gap-4 text-xs text-gray-500">
               <span>{selectedApp.percentage.toFixed(1)}% of total spend</span>
               <span>Workspace count: {selectedApp.workspace_count}</span>
-              {!selectedApp.is_registered && (
+              {selectedApp.deployed_elsewhere ? (
+                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-600">Deployed in another workspace</span>
+              ) : !selectedApp.is_registered && (
                 <span className="rounded bg-yellow-100 px-1.5 py-0.5 text-yellow-700">Not in Apps registry — may be deleted</span>
               )}
             </div>
@@ -1120,18 +1130,13 @@ export function AppsCostCenter({ data: initialData, isLoading: initialLoading, h
 
         {/* Tile grid */}
         {filteredApps.length > 0 ? (
-          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
+          <div className="grid grid-cols-3 items-start gap-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8">
             {paginatedApps.map((app, idx) => {
               const isSelected = selectedApp?.app_id === app.app_id;
               const color = appColorMap[app.app_name] || APP_COLORS[idx % APP_COLORS.length];
               const isResolved = app.app_name !== app.app_id;
 
-              // Scale icon size linearly based on spend (min 32px, max 56px)
-              const maxSpend = filteredApps[0]?.total_spend || 1;
-              const minSize = 32;
-              const maxSize = 56;
-              const ratio = maxSpend > 0 ? app.total_spend / maxSpend : 0;
-              const iconSize = Math.round(minSize + ratio * (maxSize - minSize));
+              const iconSize = appIconSize(app.total_spend, maxTileSpend);
 
               return (
                 <button

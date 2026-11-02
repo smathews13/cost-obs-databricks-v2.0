@@ -1,9 +1,9 @@
 import { useState, useEffect, useCallback, useRef, Fragment } from "react";
 import { createPortal } from "react-dom";
-import { useQueryClient } from "@tanstack/react-query";
 import { Spinner } from "./Spinner";
 import { ReadinessChecks, normalizeReadinessResult } from "./settings/ReadinessChecks";
-import { VirtualizedList } from "./VirtualizedList";
+import { WorkspaceScopePicker } from "./WorkspaceScope";
+import { useWorkspaceScopeEditor } from "@/hooks/useWorkspaceScopeEditor";
 import type { ReadinessResult } from "./settings/ReadinessChecks";
 import { isAccessError, isGrantableCatalogError, setupBuildOutcome } from "../utils/setupBuild";
 import type { SetupBuildTask, SetupUserGrants } from "../utils/setupBuild";
@@ -142,17 +142,7 @@ function PermissionErrorBlock({ error, onGranted }: { error: string; onGranted: 
   );
 }
 
-const SCOPE_INDEPENDENT_QUERIES = new Set([
-  "user", "user-permissions", "unified-settings", "app-config", "warehouses",
-  "cloud-provider", "cloud-connections", "health", "debug-run", "mv-sources",
-]);
-
-function isScopeIndependentQuery(head: string): boolean {
-  return SCOPE_INDEPENDENT_QUERIES.has(head) || head.startsWith("settings-") || head.startsWith("setup-");
-}
-
 export function SetupWizard({ onComplete, onClose, embedded }: SetupWizardProps) {
-  const queryClient = useQueryClient();
   const [step, setStep] = useState<WizardStep>("welcome");
   const [config, setConfig] = useState<ConfigData | null>(null);
   const [cloud, setCloud] = useState<CloudData | null>(null);
@@ -184,17 +174,7 @@ export function SetupWizard({ onComplete, onClose, embedded }: SetupWizardProps)
   const [schemaInput, setSchemaInput] = useState("");
   const [storageEnvVarLocked, setStorageEnvVarLocked] = useState(false);
 
-  // Workspace filter step state
-  const [wsLoading, setWsLoading] = useState(false);
-  const [allWorkspaces, setAllWorkspaces] = useState<{ id: string; name: string; historical?: boolean }[]>([]);
-  const [selectedWsIds, setSelectedWsIds] = useState<Set<string>>(new Set());
-  const [wsSaved, setWsSaved] = useState(false);
-  const [wsSaving, setWsSaving] = useState(false);
-  // The pool saved by a previous run of this step. [] = all workspaces.
-  const [savedWsIds, setSavedWsIds] = useState<string[]>([]);
-  // Set when the saved pool or the workspace list couldn't be loaded. Saving is
-  // blocked then: the selection would be empty or "all", silently widening the pool.
-  const [wsPoolError, setWsPoolError] = useState<string | null>(null);
+  const wsScope = useWorkspaceScopeEditor();
 
   // Load initial data
   useEffect(() => {
@@ -378,84 +358,6 @@ export function SetupWizard({ onComplete, onClose, embedded }: SetupWizardProps)
     }
   };
 
-  const loadWorkspaces = useCallback(async () => {
-    setWsLoading(true);
-    setWsSaved(false);
-    setWsPoolError(null);
-    try {
-      const [filterRes, listRes] = await Promise.all([
-        fetch("/api/setup/workspace-filter").catch(() => null),
-        fetch("/api/setup/list-workspaces").catch(() => null),
-      ]);
-      if (!filterRes?.ok) {
-        const body = await filterRes?.json().catch(() => ({}));
-        setWsPoolError(body?.detail || "Could not read the saved workspace scope.");
-        return;
-      }
-      const saved: string[] = (await filterRes.json()).workspace_ids ?? [];
-      setSavedWsIds(saved);
-      // Without the list nothing is selectable, and saving an empty selection means
-      // "all workspaces", so this blocks saving the same way an unreadable pool does.
-      if (!listRes?.ok) {
-        const body = await listRes?.json().catch(() => ({}));
-        setWsPoolError(body?.detail || "Could not load the workspace list.");
-        return;
-      }
-      {
-        const data = await listRes.json();
-        const list: { id: string; name: string; historical?: boolean }[] = data.workspaces ?? [];
-        // Keep saved ids the list didn't return selectable, so saving again can't drop them silently.
-        const missing = saved.filter((id) => !list.some((w) => w.id === id));
-        setAllWorkspaces([...list, ...missing.map((id) => ({ id, name: id, historical: true }))]);
-        // Start from the saved pool; with none saved, everything is selected.
-        setSelectedWsIds(new Set(saved.length > 0 ? saved : list.map((w) => w.id)));
-      }
-    } catch (e) {
-      setWsPoolError(`Could not load the workspaces: ${e}`);
-    } finally {
-      setWsLoading(false);
-    }
-  }, []);
-
-  // Returns false (and shows the error) when the save failed, so the wizard stays on
-  // this step instead of moving on as if the filter had been saved.
-  const saveWorkspaceFilter = async (): Promise<boolean> => {
-    if (wsPoolError) return false;
-    // Every workspace selected means "no filter". Sending the explicit list would lock
-    // the pool to today's workspaces and hide any created later.
-    const ids = selectedWsIds.size === allWorkspaces.length ? [] : Array.from(selectedWsIds);
-    setError(null);
-    setWsSaving(true);
-    try {
-      const res = await fetch("/api/setup/save-workspace-filter", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workspace_ids: ids }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setError(body.detail || `Could not save the workspace filter (HTTP ${res.status})`);
-        return false;
-      }
-      setWsSaved(true);
-      setSavedWsIds(ids);
-      // Every cached tab payload belongs to the previous scope. Reset rather than
-      // invalidate so tabs show their loading state, not the old numbers, while
-      // they refetch. Identity and settings queries don't depend on the scope;
-      // resetting them would blank the dialog this wizard runs in.
-      await queryClient.resetQueries({
-        predicate: (q) => !isScopeIndependentQuery(String(q.queryKey[0] ?? "")),
-      });
-      queryClient.invalidateQueries({ queryKey: ["setup-workspace-filter"] });
-      return true;
-    } catch (e) {
-      setError(`Could not save the workspace filter: ${e}`);
-      return false;
-    } finally {
-      setWsSaving(false);
-    }
-  };
-
   const goNext = () => {
     const idx = STEPS.indexOf(step);
     if (idx < STEPS.length - 1) {
@@ -463,7 +365,7 @@ export function SetupWizard({ onComplete, onClose, embedded }: SetupWizardProps)
       setStep(next);
       if (next === "permissions") loadReadiness();
       if (next === "create-tables") { pollSetupStatus(); loadPreflight(); }
-      if (next === "workspace-filter") loadWorkspaces();
+      if (next === "workspace-filter") wsScope.load();
     }
   };
 
@@ -581,22 +483,26 @@ export function SetupWizard({ onComplete, onClose, embedded }: SetupWizardProps)
           )}
 
           {step === "workspace-filter" && (
-            <WorkspaceFilterStep
-              loading={wsLoading}
-              workspaces={allWorkspaces}
-              selectedIds={selectedWsIds}
-              onToggle={(id) => setSelectedWsIds((prev) => {
-                const next = new Set(prev);
-                next.has(id) ? next.delete(id) : next.add(id);
-                return next;
-              })}
-              onSelectAll={() => setSelectedWsIds(new Set(allWorkspaces.map((w) => w.id)))}
-              onClearAll={() => setSelectedWsIds(new Set())}
-              saved={wsSaved}
-              savedIds={savedWsIds}
-              poolError={wsPoolError}
-              onRetry={loadWorkspaces}
-            />
+            <>
+              <WorkspaceScopePicker
+                loading={wsScope.loading}
+                workspaces={wsScope.workspaces}
+                selectedIds={wsScope.selectedIds}
+                onToggle={wsScope.toggle}
+                onSelectAll={wsScope.selectAll}
+                onClearAll={wsScope.clearAll}
+                saved={wsScope.saved}
+                savedIds={wsScope.savedIds}
+                poolError={wsScope.poolError}
+                onRetry={wsScope.load}
+                intro="Choose which workspaces this app should display data for. Admins can change this later in Settings → Workspace scope."
+                emptyHint={<>No workspaces with billing activity were found. Click <strong>Continue (all workspaces)</strong> to show data for all workspaces, or go back and check that system table permissions are granted.</>}
+                poolErrorHint="Saving is disabled so the current scope isn't replaced by mistake. Retry, or Skip to keep it as it is."
+              />
+              {wsScope.saveError && (
+                <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-800">{wsScope.saveError}</div>
+              )}
+            </>
           )}
 
           {step === "complete" && <CompleteStep />}
@@ -631,11 +537,11 @@ export function SetupWizard({ onComplete, onClose, embedded }: SetupWizardProps)
                   Skip
                 </button>
                 <button
-                  onClick={async () => { if (await saveWorkspaceFilter()) goNext(); }}
-                  disabled={wsLoading || wsSaving || !!wsPoolError}
+                  onClick={async () => { if (await wsScope.save()) goNext(); }}
+                  disabled={wsScope.loading || wsScope.saving || !!wsScope.poolError}
                   className="btn-brand rounded-lg px-6 py-2 text-sm font-bold text-white transition-colors disabled:opacity-50"
                 >
-                  {selectedWsIds.size === 0 || selectedWsIds.size === allWorkspaces.length ? "Continue (all workspaces)" : `Save & Continue (${selectedWsIds.size} workspace${selectedWsIds.size !== 1 ? "s" : ""})`}
+                  {wsScope.selectedIds.size === 0 || wsScope.selectedIds.size === wsScope.workspaces.length ? "Continue (all workspaces)" : `Save & Continue (${wsScope.selectedIds.size} workspace${wsScope.selectedIds.size !== 1 ? "s" : ""})`}
                 </button>
               </div>
             ) : step === "create-tables" ? (
@@ -1340,127 +1246,6 @@ function CreateTablesStep({ setupStatus, creating, tablesJustCreated, preflightR
         This typically takes 2-5 minutes depending on data volume.
         Click "Create Tables" to begin.
       </p>
-    </div>
-  );
-}
-
-function WorkspaceFilterStep({
-  loading,
-  workspaces,
-  selectedIds,
-  onToggle,
-  onSelectAll,
-  onClearAll,
-  saved,
-  savedIds,
-  poolError,
-  onRetry,
-}: {
-  loading: boolean;
-  workspaces: { id: string; name: string; historical?: boolean }[];
-  selectedIds: Set<string>;
-  onToggle: (id: string) => void;
-  onSelectAll: () => void;
-  onClearAll: () => void;
-  saved: boolean;
-  savedIds: string[];
-  poolError: string | null;
-  onRetry: () => void;
-}) {
-  if (loading) return <LoadingSpinner text="Loading workspaces..." />;
-
-  if (poolError) {
-    return (
-      <div className="space-y-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
-        <p className="text-sm font-medium text-red-800">{poolError}</p>
-        <p className="text-xs text-red-700">
-          Saving is disabled so the current scope isn't replaced by mistake. Retry, or Skip to keep it as it is.
-        </p>
-        <button onClick={onRetry} className="text-sm font-medium hover:underline" style={{ color: '#FF3621' }}>
-          Retry
-        </button>
-      </div>
-    );
-  }
-
-  const nameOf = (id: string) => workspaces.find((w) => w.id === id)?.name || id;
-  const currentScope = savedIds.length === 0
-    ? "All workspaces"
-    : savedIds.length === 1
-    ? nameOf(savedIds[0])
-    : `${savedIds.length} workspaces`;
-
-  return (
-    <div className="space-y-4">
-      <p className="text-sm text-gray-600">
-        Choose which workspaces this app should display data for. Admins can come back to this step at any time to change it.
-      </p>
-      <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-xs text-gray-600">
-        Currently scoped to: <span className="font-medium text-gray-800">{currentScope}</span>
-      </div>
-
-      {workspaces.length === 0 ? (
-        <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-700">
-          No workspaces with billing activity were found. Click <strong>Continue (all workspaces)</strong> to show data for all workspaces, or go back and check that system table permissions are granted.
-        </div>
-      ) : (
-        <>
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-500">
-              {selectedIds.size === 0 || selectedIds.size === workspaces.length ? "All workspaces will be shown" : `${selectedIds.size} of ${workspaces.length} selected`}
-            </span>
-            <div className="flex gap-3">
-              <button onClick={onSelectAll} className="text-xs font-medium hover:underline" style={{ color: '#FF3621' }}>Select All</button>
-              <button onClick={onClearAll} className="text-xs font-medium hover:underline" style={{ color: '#FF3621' }}>Clear All</button>
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 p-2">
-            <VirtualizedList
-              items={workspaces}
-              itemHeight={48}
-              maxHeight={208}
-              getKey={(ws) => ws.id}
-              renderItem={(ws) => {
-                const checked = selectedIds.has(ws.id);
-                return (
-                  <label className={`flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition-colors ${checked ? "bg-orange-50" : "hover:bg-gray-50"}`}>
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => onToggle(ws.id)}
-                      className="h-3.5 w-3.5 rounded border-gray-300 text-orange-500 focus:ring-orange-500"
-                    />
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-sm font-medium text-gray-800 truncate">{ws.name}</span>
-                        {ws.historical && (
-                          <span className="shrink-0 rounded-full border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700" title="This workspace no longer exists in the account — data is historical.">
-                            historical
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-xs font-mono text-gray-500">{ws.id}</div>
-                    </div>
-                  </label>
-                );
-              }}
-            />
-          </div>
-
-          {selectedIds.size === 0 && (
-            <p className="text-xs text-gray-500">
-              No workspaces selected — all workspaces will be visible in the dashboard. Select specific workspaces to restrict the data shown.
-            </p>
-          )}
-        </>
-      )}
-
-      {saved && (
-        <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-2.5">
-          <p className="text-xs font-medium text-green-800">Workspace scope saved. It persists across redeploys.</p>
-        </div>
-      )}
     </div>
   );
 }

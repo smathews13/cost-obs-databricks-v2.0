@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { SettingsAccuracyChecks, SettingsDebugger } from "./settings";
 import { READINESS_QUERY_KEY } from "@/hooks/useFeatureAvailability";
 import { SetupWizard } from "./SetupWizard";
+import { WorkspaceScopeSection } from "./WorkspaceScope";
 import {
   ToastProvider, useToast, Badge, T,
 } from "./settings/dubois";
@@ -147,7 +148,7 @@ function saveAppSettings(settings: AppSettings) {
   localStorage.setItem(APP_SETTINGS_KEY, JSON.stringify(out));
 }
 
-type NavKey = "general" | "tabs" | "alerts" | "data" | "access" | "resources" | "experimental";
+type NavKey = "general" | "tabs" | "alerts" | "data" | "scope" | "access" | "resources" | "experimental";
 type Overlay = "setup" | "debugger" | "accuracy" | null;
 
 export interface SettingsCapabilities {
@@ -276,7 +277,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
 
   // Kick non-admins out of admin-only sections/overlays.
   useEffect(() => {
-    const adminSections: NavKey[] = ["alerts", "data", "access", "experimental"];
+    const adminSections: NavKey[] = ["alerts", "data", "scope", "access", "experimental"];
     if (permissions && !isAdmin && adminSections.includes(nav)) setNav("general");
     if (permissions && !isAdmin && overlay) setOverlay(null);
   }, [permissions, isAdmin, nav, overlay]);
@@ -401,6 +402,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
     { key: "general", label: "General" },
     { key: "tabs", label: "Dashboard tabs" },
     { key: "data", label: "Data & tables", admin: true },
+    { key: "scope", label: "Workspace scope", admin: true },
     { key: "alerts", label: "Alerts & notifications", admin: true },
     { key: "access", label: "Access", admin: true },
     { key: "resources", label: "Resources" },
@@ -477,6 +479,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
               {!overlay && nav === "tabs" && <DashboardTabsSection localVisibility={localVisibility} toggleTab={toggleTab} enableUseCaseTracking={localSettings.enableUseCaseTracking} />}
               {!overlay && nav === "alerts" && <AlertsSection localSettings={localSettings} updateSetting={updateSetting} caps={caps} />}
               {!overlay && nav === "data" && <DataTablesSection localSettings={localSettings} updateSetting={updateSetting} caps={caps} />}
+              {!overlay && nav === "scope" && isAdmin && <WorkspaceScopeSection />}
               {!overlay && nav === "access" && <AccessSection />}
               {!overlay && nav === "resources" && <ResourcesSection />}
               {!overlay && nav === "experimental" && <ExperimentalSection localSettings={localSettings} updateSetting={updateSetting} />}

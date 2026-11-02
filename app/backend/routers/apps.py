@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import threading
 import time
@@ -18,20 +19,20 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 
+from backend import cache_ttls
+from backend import workspace_filter as wf
 from backend.db import (
-    execute_query,
-    execute_queries_parallel,
-    get_workspace_client,
+    apply_mv_overrides,
     bundle_cache_key,
     delta_cache_get,
     delta_cache_put,
-    apply_mv_overrides,
+    execute_queries_parallel,
+    execute_query,
     get_catalog_schema,
+    get_workspace_client,
     source_label_filter_clause,
     source_scope_unavailable,
 )
-from backend import workspace_filter as wf
-from backend import cache_ttls
 from backend.routers.billing import _check_mv_available
 
 router = APIRouter()
@@ -96,6 +97,53 @@ def _get_app_registry() -> dict[str, dict[str, str]]:
     except Exception as e:
         logger.warning("Failed to fetch app registry: %s", e)
         return _app_name_cache  # return stale cache on error
+
+
+_APP_URL_WS_RE = re.compile(r"-(\d{6,})\.[a-z0-9.-]*databricksapps\.com", re.IGNORECASE)
+_host_ws_id_cache: str | None = None
+
+
+def _host_workspace_id(registry: dict[str, dict[str, str]]) -> str | None:
+    """The workspace the Apps registry describes: the one this app runs in.
+
+    The Apps API only lists apps in the calling workspace, so the registry says
+    nothing about apps billed to any other workspace. App URLs carry the
+    workspace id (<name>-<workspace-id>.<cloud>.databricksapps.com).
+    """
+    global _host_ws_id_cache
+    if _host_ws_id_cache:
+        return _host_ws_id_cache
+    for entry in registry.values():
+        m = _APP_URL_WS_RE.search(entry.get("url") or "")
+        if m:
+            _host_ws_id_cache = m.group(1)
+            return _host_ws_id_cache
+    env_id = (os.getenv("DATABRICKS_WORKSPACE_ID") or "").strip()
+    if env_id:
+        _host_ws_id_cache = env_id
+        return env_id
+    try:
+        ws_id = get_workspace_client().get_workspace_id()
+        if ws_id:
+            _host_ws_id_cache = str(ws_id)
+    except Exception as e:
+        logger.debug("Could not resolve the host workspace id: %s", e)
+    return _host_ws_id_cache
+
+
+# Names for apps outside the host workspace come from billing, which records
+# the app name on every APPS usage row.
+APPS_BILLING_NAMES = """
+SELECT
+  u.usage_metadata.app_id AS app_id,
+  MAX_BY(u.usage_metadata.app_name, u.usage_date) AS app_name
+FROM system.billing.usage u
+WHERE u.usage_date BETWEEN :start_date AND :end_date
+  AND u.billing_origin_product = 'APPS'
+  AND u.usage_metadata.app_id IS NOT NULL
+  AND u.usage_metadata.app_name IS NOT NULL
+GROUP BY u.usage_metadata.app_id
+"""
 
 
 # ── Connected artifacts cache ────────────────────────────────────────
@@ -511,17 +559,25 @@ def _process_apps(
     end_date_str: str,
     registry: dict[str, dict[str, str]],
     sku_rows: list[dict[str, Any]] | None = None,
+    *,
+    app_workspaces: dict[str, list[str]] | None = None,
+    host_ws_id: str | None = None,
+    host_in_scope: bool = True,
+    billing_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Split billing rows into registered apps + unregistered bucket.
+    """Turn billing rows into app tiles.
 
-    Strategy: show every app that exists in the Apps API registry as an
-    individual tile (these are "real" deployed apps).  Billing rows whose
-    UUID doesn't match any registered app are bucketed as
-    "Unregistered apps" (likely synthetic data or deleted apps).
+    The Apps API registry only covers the workspace this app runs in (the host).
+    So an app billed to another workspace is a live app there, not a deleted one;
+    it gets a tile named from billing. Only an unregistered app billed solely to
+    the host workspace is historical (deleted). Registry apps with no billing are
+    shown only when the host workspace is in the selected scope.
 
     Returns a dict with keys: apps, inactive_summary, total_app_count,
     active_count, inactive_count, total_spend, unregistered_summary.
     """
+    app_workspaces = app_workspaces or {}
+    billing_names = billing_names or {}
     end_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date()
     active_cutoff = end_dt - timedelta(days=ACTIVE_DAYS)
 
@@ -537,106 +593,103 @@ def _process_apps(
         else:
             inactive_rows.append(r)
 
-    # Build the list we'll return as individual tiles
     source = active_rows if active_only else raw_apps
     total_spend_all = sum(float(r.get("total_spend") or 0) for r in source)
 
-    # Separate registered (real) apps from unregistered billing UUIDs
-    registered_apps: list[dict[str, Any]] = []
-    unregistered_rows: list[dict[str, Any]] = []
+    def _elsewhere(app_id: str) -> bool:
+        if not host_ws_id:
+            return app_id in billing_names
+        return any(ws != host_ws_id for ws in app_workspaces.get(app_id, []))
 
-    for r in source:
-        raw_id = r.get("app_id") or r.get("app_name") or "Unknown"
-        if raw_id in registry:
-            registered_apps.append(r)
-        else:
-            unregistered_rows.append(r)
-
-    apps = []
-    for r in registered_apps:
-        raw_id = r.get("app_id") or r.get("app_name") or "Unknown"
+    def _tile(r: dict[str, Any], raw_id: str, **extra: Any) -> dict[str, Any]:
         spend = float(r.get("total_spend") or 0)
-        reg_entry = registry.get(raw_id, {})
-        apps.append({
+        return {
             "app_id": raw_id,
-            "app_name": reg_entry.get("name", raw_id),
-            "app_url": reg_entry.get("url", ""),
+            "app_name": raw_id,
+            "app_url": "",
             "total_dbus": float(r.get("total_dbus") or 0),
             "total_spend": spend,
             "workspace_count": r.get("workspace_count") or 0,
             "days_active": r.get("days_active") or 0,
             "last_usage_date": str(r.get("last_usage_date")) if r.get("last_usage_date") else None,
             "percentage": (spend / total_spend_all * 100) if total_spend_all > 0 else 0,
-            "is_registered": True,
             "status": "active" if r.get("_is_active") else "inactive",
-        })
+            "is_registered": False,
+            **extra,
+        }
 
-    # Sort registered apps by spend desc
+    apps: list[dict[str, Any]] = []
+    historical_rows: list[dict[str, Any]] = []
+    for r in source:
+        raw_id = r.get("app_id") or r.get("app_name") or "Unknown"
+        if raw_id in registry:
+            reg_entry = registry[raw_id]
+            apps.append(_tile(
+                r, raw_id,
+                app_name=reg_entry.get("name", raw_id),
+                app_url=reg_entry.get("url", ""),
+                is_registered=True,
+            ))
+        elif _elsewhere(raw_id):
+            apps.append(_tile(
+                r, raw_id,
+                app_name=billing_names.get(raw_id, raw_id),
+                deployed_elsewhere=True,
+            ))
+        else:
+            historical_rows.append(r)
+
     apps.sort(key=lambda a: a["total_spend"], reverse=True)
 
-    # Add inactive apps from two additional sources when not in active-only mode:
-    #   (A) Registered apps that have NO billing data in this window — they're deployed but idle
-    #   (B) Unregistered billing rows with old last_usage (deleted apps with stale billing data)
     if not active_only:
         apps_in_list = {a["app_id"] for a in apps}
 
-        # (A) Registry apps with no billing at all in the window
-        for uid, entry in registry.items():
-            if uid in apps_in_list:
-                continue
-            apps.append({
-                "app_id": uid,
-                "app_name": entry.get("name", uid),
-                "app_url": entry.get("url", ""),
-                "total_dbus": 0,
-                "total_spend": 0,
-                "workspace_count": 0,
-                "days_active": 0,
-                "last_usage_date": None,
-                "percentage": 0,
-                "is_registered": True,
-                "status": "inactive",
-            })
-            apps_in_list.add(uid)
+        # Deployed in the host workspace but idle for the whole window.
+        if host_in_scope:
+            for uid, entry in registry.items():
+                if uid in apps_in_list:
+                    continue
+                apps.append({
+                    "app_id": uid,
+                    "app_name": entry.get("name", uid),
+                    "app_url": entry.get("url", ""),
+                    "total_dbus": 0,
+                    "total_spend": 0,
+                    "workspace_count": 0,
+                    "days_active": 0,
+                    "last_usage_date": None,
+                    "percentage": 0,
+                    "is_registered": True,
+                    "status": "inactive",
+                })
+                if host_ws_id:
+                    app_workspaces.setdefault(uid, [host_ws_id])
+                apps_in_list.add(uid)
 
-        # (B) Unregistered billing rows with old last_usage (deleted apps)
-        for r in inactive_rows:
+        # Deleted apps that still have billing in the window.
+        for r in historical_rows:
             raw_id = r.get("app_id") or r.get("app_name") or "Unknown"
-            if raw_id in apps_in_list:
+            if raw_id in apps_in_list or r.get("_is_active"):
                 continue
-            spend = float(r.get("total_spend") or 0)
-            apps.append({
-                "app_id": raw_id,
-                "app_name": raw_id,
-                "app_url": "",
-                "total_dbus": float(r.get("total_dbus") or 0),
-                "total_spend": spend,
-                "workspace_count": r.get("workspace_count") or 0,
-                "days_active": r.get("days_active") or 0,
-                "last_usage_date": str(r.get("last_usage_date")) if r.get("last_usage_date") else None,
-                "percentage": (spend / total_spend_all * 100) if total_spend_all > 0 else 0,
-                "is_registered": False,
-                "status": "inactive",
-            })
+            apps.append(_tile(
+                r, raw_id,
+                app_name=billing_names.get(raw_id, raw_id),
+                historical=True,
+            ))
             apps_in_list.add(raw_id)
 
-    # Unregistered apps summary
-    unreg_spend = sum(float(r.get("total_spend") or 0) for r in unregistered_rows)
-    unreg_dbus = sum(float(r.get("total_dbus") or 0) for r in unregistered_rows)
+    unreg_spend = sum(float(r.get("total_spend") or 0) for r in historical_rows)
+    unreg_dbus = sum(float(r.get("total_dbus") or 0) for r in historical_rows)
 
-    # Inactive summary (when showing active only)
     inactive_spend = sum(float(r.get("total_spend") or 0) for r in inactive_rows)
     inactive_dbus = sum(float(r.get("total_dbus") or 0) for r in inactive_rows)
 
     registered_spend = sum(a["total_spend"] for a in apps)
 
-    # Attach per-app SKU breakdown if available
     if sku_rows:
         sku_by_app: dict[str, list[dict[str, Any]]] = {}
         for row in sku_rows:
             aid = row.get("app_id") or "Unknown"
-            if aid not in registry:
-                continue  # skip unregistered
             sku_by_app.setdefault(aid, []).append({
                 "sku_name": row.get("sku_name") or "Unknown",
                 "total_dbus": float(row.get("total_dbus") or 0),
@@ -649,12 +702,16 @@ def _process_apps(
                 item["percentage"] = (item["total_spend"] / app_spend * 100) if app_spend > 0 else 0
             app["sku_breakdown"] = breakdown
 
+    for app in apps:
+        app["workspace_names"] = list(app_workspaces.get(app["app_id"], []))
+
+    live = [a for a in apps if not a.get("historical")]
     return {
         "apps": apps,
         "total_spend": registered_spend,
         "total_app_count": len(apps),
-        "active_count": sum(1 for a in apps if a.get("status") == "active"),
-        "inactive_count": sum(1 for a in apps if a.get("status") == "inactive"),
+        "active_count": sum(1 for a in live if a.get("status") == "active"),
+        "inactive_count": sum(1 for a in live if a.get("status") == "inactive"),
         "inactive_summary": {
             "count": len(inactive_rows),
             "total_spend": inactive_spend,
@@ -664,7 +721,7 @@ def _process_apps(
             else 0,
         },
         "unregistered_summary": {
-            "count": len(unregistered_rows),
+            "count": len(historical_rows),
             "total_spend": unreg_spend,
             "total_dbus": unreg_dbus,
             "percentage": (unreg_spend / total_spend_all * 100) if total_spend_all > 0 else 0,
@@ -753,7 +810,7 @@ def _apps_failure_payload(
 def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, dkey: str) -> None:
     """Background worker: run all Apps queries, build response, write to Delta cache."""
     import time as _time
-    _endpoint = f"apps:dashboard-bundle:{'active' if active_only else 'all'}"
+    _endpoint = f"apps:dashboard-bundle:v2:{'active' if active_only else 'all'}"
     _start = _time.time()
 
     try:
@@ -762,8 +819,13 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
         def _ws(sql: str) -> str:
             return wf.inject_ws_filter(sql, ws_clause)
 
-        registry = _get_app_registry()  # TTL-cached (1h); always populated before filter is built
-        app_filter = _build_app_id_filter(registry)
+        registry = _get_app_registry()  # TTL-cached (1h)
+        host_ws_id = _host_workspace_id(registry)
+        # The registry only lists the host workspace's apps, so it can't be used to
+        # filter billing: that would drop every app deployed anywhere else.
+        app_filter = ""
+        scope_ids = id_list or wf.get_configured_workspace_ids() or None
+        host_in_scope = not scope_ids or (host_ws_id is not None and host_ws_id in scope_ids)
 
         filtered_timeseries = f"""
         SELECT
@@ -821,15 +883,18 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
         # scan for the four heavy slots when the MV is available. Each helper
         # falls back to its raw counterpart on any exception so a broken MV
         # never blocks a page load.
-        from backend.lakebase_read import PG_APPS_IDENTITIES, dual_read_mv, gold_read, warehouse_view_fallback
+        from backend.lakebase_read import (
+            PG_APPS_IDENTITIES,
+            dual_read_mv,
+            gold_read,
+            warehouse_view_fallback,
+        )
         live_ok = warehouse_view_fallback()
         # Lakebase-on viewers skip the warehouse DESCRIBE; dual_read still serves Postgres first.
         _use_mv = True if not live_ok else _check_mv_available()
         _mv_ws_clause = wf.build_ws_filter_clause(col="workspace_id", id_list=id_list) if _use_mv else ""
         # MV column is bare `app_id`; the raw filter uses `u.usage_metadata.app_id`
         _mv_app_filter = ""
-        if _use_mv and registry:
-            _mv_app_filter = "AND app_id IN (" + ", ".join(f"'{uid}'" for uid in registry) + ")"
 
         def _mv_query(name: str, mv_sql_tpl: str, raw_fallback: Any, **fmt_kwargs: str) -> list[dict[str, Any]]:
             """Postgres first. Warehouse gold only if Postgres misses."""
@@ -867,6 +932,7 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
             ("sku_breakdown", lambda: _mv_query("sku_breakdown", MV_APPS_BY_APP_SKU, lambda: execute_query(_ws(APPS_BY_APP_SKU), params))),
             ("workspaces", lambda: _query_app_workspaces(params, ws_clause)),
             ("service_principals", lambda: _gold_sps()),
+            ("app_names", lambda: execute_query(APPS_BILLING_NAMES, params) if live_ok else []),
         ]
 
         results = execute_queries_parallel(queries, 75.0)
@@ -897,10 +963,16 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
 
         raw_apps = results.get("apps", []) or []
         sku_rows = results.get("sku_breakdown", []) or []
-        apps_result = _process_apps(raw_apps, active_only, params["end_date"], registry, sku_rows)
-
-        for app in apps_result["apps"]:
-            app["workspace_names"] = app_workspace_map.get(app["app_id"], [])
+        billing_names = {
+            str(r["app_id"]): str(r["app_name"])
+            for r in (results.get("app_names") or [])
+            if r.get("app_id") and r.get("app_name")
+        }
+        apps_result = _process_apps(
+            raw_apps, active_only, params["end_date"], registry, sku_rows,
+            app_workspaces=app_workspace_map, host_ws_id=host_ws_id,
+            host_in_scope=host_in_scope, billing_names=billing_names,
+        )
 
         summary_row = summary_data[0] if summary_data else {}
         total_spend_all = float(summary_row.get("total_spend") or 0)
@@ -1036,7 +1108,7 @@ async def get_apps_dashboard_bundle(
     )
     if blocked:
         return {**_apps_failure_payload(params, "SOURCE_SCOPE_UNSUPPORTED"), **blocked, "active_only": active_only}
-    _endpoint = f"apps:dashboard-bundle:{'active' if active_only else 'all'}"
+    _endpoint = f"apps:dashboard-bundle:v2:{'active' if active_only else 'all'}"
     _dkey = bundle_cache_key(_endpoint, params["start_date"], params["end_date"], id_list)
 
     if (_dcached := delta_cache_get(_dkey)) is not None:
@@ -1064,16 +1136,7 @@ async def get_apps_dashboard_bundle(
     )
 
 
-# ── KPI Trend (registered-apps-only) ─────────────────────────────────
-
-def _build_app_id_filter(registry: dict[str, dict[str, str]]) -> str:
-    """Build a SQL IN-clause for registered app UUIDs.
-    Returns empty string when registry is unavailable so we still show all apps data.
-    """
-    if not registry:
-        return ""  # no registry → no filter, show all billing APPS rows
-    ids = ", ".join(f"'{uid}'" for uid in registry)
-    return f"AND u.usage_metadata.app_id IN ({ids})"
+# ── KPI Trend ────────────────────────────────────────────────────────
 
 
 @router.get("/kpi-trend")
@@ -1083,7 +1146,7 @@ async def get_apps_kpi_trend(
     end_date: str = Query(default=None),
     granularity: str = Query("daily", description="daily, weekly, monthly"),
 ) -> dict[str, Any]:
-    """KPI trend filtered to registered apps only."""
+    """KPI trend over every app billed in scope, matching the dashboard KPIs."""
     params = {
         "start_date": start_date or get_default_start_date(),
         "end_date": end_date or get_default_end_date(),
@@ -1092,8 +1155,7 @@ async def get_apps_kpi_trend(
     if (_dcached := delta_cache_get(_dkey)) is not None:
         return _dcached
 
-    registry = _app_name_cache  # use stale cache — background refresh handled by dashboard-bundle
-    app_filter = _build_app_id_filter(registry)
+    app_filter = ""
 
     from backend.lakebase_read import KPI_TREND_PG, gold_read, warehouse_view_fallback
     pg = KPI_TREND_PG.get(kpi)
