@@ -10,7 +10,7 @@ import {
   Slack,
 } from "lucide-react";
 import { FloatingMenu } from "@/components/ui/FloatingMenu";
-import { domainIconForEmail } from "@/utils/domainIcons";
+import { DEFAULT_DOMAIN_ICON, domainIconForEmail } from "@/utils/domainIcons";
 
 interface UserMenuProps {
   name: string;
@@ -105,7 +105,11 @@ export function UserMenu({ name, email, isAdmin, workspaceHost }: UserMenuProps)
   const hoverCloseTimerRef = useRef<number | null>(null);
   const baseUrl = useMemo(() => workspaceBaseUrl(workspaceHost), [workspaceHost]);
   const displayName = useMemo(() => readableUserName(name, email), [name, email]);
-  const domainIcon = useMemo(() => domainIconForEmail(email), [email]);
+  const preferredIcon = useMemo(() => domainIconForEmail(email), [email]);
+  // Customer logos are not published to the public mirror; fall back when one is missing.
+  const [failedIconSrc, setFailedIconSrc] = useState<string | null>(null);
+  const domainIcon = failedIconSrc === preferredIcon.src ? DEFAULT_DOMAIN_ICON : preferredIcon;
+  const onIconError = useCallback(() => setFailedIconSrc(preferredIcon.src), [preferredIcon.src]);
 
   const closeMenu = useCallback((returnFocus = true) => {
     setOpen(false);
@@ -288,6 +292,7 @@ export function UserMenu({ name, email, isAdmin, workspaceHost }: UserMenuProps)
         >
           <img
             src={domainIcon.src}
+            onError={onIconError}
             alt=""
             aria-hidden="true"
             className="aspect-square object-contain"
@@ -313,6 +318,7 @@ export function UserMenu({ name, email, isAdmin, workspaceHost }: UserMenuProps)
             >
               <img
                 src={domainIcon.src}
+                onError={onIconError}
                 alt=""
                 aria-hidden="true"
                 className="aspect-square object-contain"

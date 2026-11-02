@@ -11,7 +11,7 @@ export interface OrganizationDefinition {
   icon: DomainIconDefinition | null;
 }
 
-const DEFAULT_DOMAIN_ICON: DomainIconDefinition = {
+export const DEFAULT_DOMAIN_ICON: DomainIconDefinition = {
   src: "/brand/databricks-symbol-white.svg",
   background: "#ff5f46",
   scale: 62,

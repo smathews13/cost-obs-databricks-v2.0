@@ -92,7 +92,9 @@ def test_runbook_is_generated_from_the_exact_runtime_gold_contract():
     assert "daily_gcp_actuals" not in canonical_sql
     assert "{ai_gateway_table}" in rendered
     assert "cmeg" not in rendered.lower()
-    assert REPOSITORY_RUNBOOK.read_text() == rendered
+    # /notebooks is internal-only and absent from the public mirror.
+    if REPOSITORY_RUNBOOK.exists():
+        assert REPOSITORY_RUNBOOK.read_text() == rendered
     compile(rendered, str(RUNBOOK), "exec")
 
 
