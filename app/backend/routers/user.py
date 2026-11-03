@@ -7,7 +7,7 @@ import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -142,14 +142,17 @@ async def _load_permissions() -> dict:
     if _perm_cache and (now - _perm_cache_at) < _PERM_CACHE_TTL:
         return _perm_cache
 
+    read_failed = False
     # Primary: Lakebase user_permissions
     try:
         from backend.db import lakebase_available, lakebase_query
         if lakebase_available():
+            read_failed = True  # cleared once the query returns
             rows = await asyncio.to_thread(
                 lakebase_query,
                 "SELECT subject_id, role FROM user_permissions WHERE subject_type = 'user'",
             )
+            read_failed = False
             owner_emails = [
                 r["subject_id"] for r in rows
                 if r.get("role") == "owner" and r.get("subject_id")
@@ -172,6 +175,8 @@ async def _load_permissions() -> dict:
                 _perm_cache_at = now
                 return result
     except Exception as e:
+        if _permission_store_missing(e):
+            read_failed = False
         logger.debug("Lakebase permissions read failed, will try UC: %s", e)
 
     try:
@@ -201,10 +206,14 @@ async def _load_permissions() -> dict:
             _perm_cache_at = now
             return result
     except Exception as e:
-        logger.error("Could not load permissions from Delta table: %s", e)
         if _perm_cache:
-            logger.warning("Returning stale permission cache to avoid false-admin escalation")
+            logger.warning("Permissions read failed (%s); using the last known permissions", e)
             return _perm_cache
+        if _permission_store_missing(e):
+            logger.info("Permissions table not created yet: %s", e)
+        else:
+            logger.error("Could not load permissions from Delta table: %s", e)
+            read_failed = True
 
     # Fallback: local file (ephemeral, dev only)
     try:
@@ -217,7 +226,52 @@ async def _load_permissions() -> dict:
             return result
     except (json.JSONDecodeError, IOError):
         pass
+    if read_failed:
+        return {"admins": [], "consumers": [], "unavailable": True}
     return {"admins": [], "consumers": []}
+
+
+_STORE_MISSING_MARKERS = (
+    "TABLE_OR_VIEW_NOT_FOUND", "SCHEMA_NOT_FOUND", "CATALOG_NOT_FOUND",
+    "NO_SUCH_CATALOG", "42P01", "3F000",
+)
+
+
+def _permission_store_missing(e: Exception) -> bool:
+    """True when the permissions table doesn't exist yet: a fresh install, not an outage."""
+    s = str(e)
+    return any(marker in s for marker in _STORE_MISSING_MARKERS)
+
+
+_app_creator_cache: str | None = None
+
+
+def app_creator_email() -> str:
+    """Who created this Databricks App, from the Apps API. '' when unknown."""
+    global _app_creator_cache
+    if _app_creator_cache is not None:
+        return _app_creator_cache
+    name = os.getenv("DATABRICKS_APP_NAME", "").strip()
+    if not name:
+        return ""
+    try:
+        from backend.db import get_workspace_client
+        creator = getattr(get_workspace_client().apps.get(name), "creator", None) or ""
+    except Exception as e:
+        logger.warning("Could not look up the app creator: %s", e)
+        return ""
+    _app_creator_cache = creator.strip().lower()
+    return _app_creator_cache
+
+
+async def role_when_permissions_unreadable(email: str) -> str:
+    """Only the app's creator is admin while the permissions store can't be read.
+
+    Treating an unreadable store as empty would make every viewer an admin, e.g.
+    on a fresh worker after a redeploy whose new service principal lacks the grant.
+    """
+    creator = await asyncio.to_thread(app_creator_email)
+    return "admin" if creator and email.strip().lower() == creator else "consumer"
 
 
 async def _get_user_role(email: str) -> str:
@@ -228,11 +282,21 @@ async def _get_user_role(email: str) -> str:
         return "admin"
     if needle in {str(item).strip().lower() for item in perms.get("consumers", [])}:
         return "consumer"
+    if perms.get("unavailable"):
+        return await role_when_permissions_unreadable(email)
     # No admins configured yet (fresh deploy) — default everyone to admin
     # so the person who set up the app can immediately configure it.
     if not perms.get("admins"):
         return "admin"
     return "consumer"
+
+
+async def require_admin(request: Request) -> str:
+    """FastAPI dependency: 403 unless the caller is an app admin."""
+    email = request.headers.get("X-Forwarded-Email", os.getenv("USER", ""))
+    if await _get_user_role(email) != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return email
 
 
 

@@ -13,9 +13,11 @@ from typing import Any, Optional
 from urllib.parse import quote, urlparse
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+from backend.routers.user import require_admin
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -46,13 +48,24 @@ _APP_RESPONSE_CACHE_TABLE = "app_response_cache"
 def _require_admin(request: Request) -> str:
     """Raise 403 if the requesting user is not an admin. Returns email on success."""
     email = request.headers.get("X-Forwarded-Email", os.getenv("USER", "dev@local"))
-    perms = _load_user_permissions()
-    admins = [str(item).strip().lower() for item in perms.get("admins", [])]
-    # Mirror user.py::_get_user_role: if no admins configured yet, everyone is
-    # admin (fresh deploy). Only enforce the list once admins have been set.
-    if admins and str(email).strip().lower() not in admins:
+    if not _is_admin_email(email, _load_user_permissions()):
         raise HTTPException(status_code=403, detail="Admin role required")
     return email
+
+
+def _is_admin_email(email: str, perms: dict) -> bool:
+    """Mirror user.py::_get_user_role. With no admins configured yet (fresh deploy)
+    everyone is admin; while the store can't be read, only the app's creator is."""
+    from backend.routers.user import app_creator_email
+
+    needle = str(email).strip().lower()
+    admins = [str(item).strip().lower() for item in perms.get("admins", [])]
+    if needle in admins:
+        return True
+    if perms.get("unavailable"):
+        creator = app_creator_email()
+        return bool(creator) and needle == creator
+    return not admins
 
 
 _ARCHITECTURE_PDF = (
@@ -1257,7 +1270,7 @@ async def preview_mv_source(catalog: str, schema: str) -> dict:
             "matched": matched, "total": len(_MV_TABLES)}
 
 
-@router.post("/mv-sources")
+@router.post("/mv-sources", dependencies=[Depends(require_admin)])
 async def add_mv_source(request: Request, body: dict) -> dict:
     """Add (or replace by label) an additional MV source and rebuild the unified
     views. The source's tables must match the app's MV structure.
@@ -1306,7 +1319,7 @@ async def add_mv_source(request: Request, body: dict) -> dict:
     return {"ok": True, "sources": sources, "build": summary}
 
 
-@router.delete("/mv-sources")
+@router.delete("/mv-sources", dependencies=[Depends(require_admin)])
 async def remove_mv_source(request: Request, label: str = None) -> dict:
     """Remove an additional MV source by label and rebuild unified views."""
     from backend.db import get_mv_sources, save_mv_sources
@@ -1324,7 +1337,7 @@ async def remove_mv_source(request: Request, label: str = None) -> dict:
     return {"ok": True, "sources": sources, "build": summary}
 
 
-@router.post("/catalog")
+@router.post("/catalog", dependencies=[Depends(require_admin)])
 async def save_catalog_settings(body: dict):
     """Save catalog/schema override from the Setup Wizard."""
     import asyncio as _asyncio
@@ -1344,7 +1357,7 @@ async def save_catalog_settings(body: dict):
     return {"catalog": catalog, "schema": schema, "source": "override"}
 
 
-@router.post("/refresh-mvs")
+@router.post("/refresh-mvs", dependencies=[Depends(require_admin)])
 async def trigger_mv_refresh(background_tasks: BackgroundTasks, lookback_days: int = 180, force_full: bool = True):
     """Kick off an MV rebuild in the background and return immediately.
 
@@ -1968,7 +1981,7 @@ class AuthModeRequest(BaseModel):
     mode: str  # "sp" only — OAuth disabled
 
 
-@router.post("/auth-mode")
+@router.post("/auth-mode", dependencies=[Depends(require_admin)])
 async def set_auth_mode(body: AuthModeRequest):
     """Auth mode endpoint — OAuth is currently disabled.
 
@@ -2172,7 +2185,7 @@ async def create_cloud_connection(request: Request, conn: CloudConnectionCreate)
 
 
 # Keep legacy endpoint for backward compatibility
-@router.post("/azure-connections")
+@router.post("/azure-connections", dependencies=[Depends(require_admin)])
 async def create_azure_connection(conn: CloudConnectionCreate):
     """Create an Azure connection (legacy endpoint)."""
     conn.provider = "azure"
@@ -2200,7 +2213,7 @@ async def delete_cloud_connection(request: Request, connection_id: str):
 
 
 # Keep legacy endpoint for backward compatibility
-@router.delete("/azure-connections/{connection_id}")
+@router.delete("/azure-connections/{connection_id}", dependencies=[Depends(require_admin)])
 async def delete_azure_connection(connection_id: str):
     """Delete an Azure connection (legacy endpoint)."""
     return await delete_cloud_connection(connection_id)
@@ -2328,7 +2341,7 @@ async def test_webhook(request: Request) -> dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
-@router.post("/webhook/send-alert")
+@router.post("/webhook/send-alert", dependencies=[Depends(require_admin)])
 async def send_webhook_alert(alert_data: dict[str, Any]) -> dict[str, Any]:
     """Send an alert notification to the configured Slack webhook."""
     settings = _load_webhook_settings()
@@ -2455,18 +2468,29 @@ def _normalized_permission_rows(
 
 
 def _load_user_permissions() -> dict:
-    """Load permissions — Lakebase first, then UC Delta table, then local file."""
+    """Load permissions — Lakebase first, then UC Delta table, then local file.
+
+    Sets "unavailable" when the store exists but couldn't be read, so callers don't
+    mistake an outage for a fresh install with no admins.
+    """
+    from backend.routers.user import _permission_store_missing
+
+    read_failed = False
     # Primary: Lakebase user_permissions
     try:
         from backend.db import lakebase_available, lakebase_query
         if lakebase_available():
+            read_failed = True
             rows = lakebase_query(
                 "SELECT subject_id, role FROM user_permissions WHERE subject_type = 'user'"
             )
+            read_failed = False
             perms = _permissions_from_role_rows(rows or [], "subject_id")
             if perms["admins"] or perms["consumers"]:
                 return perms
     except Exception as e:
+        if _permission_store_missing(e):
+            read_failed = False
         logger.debug("Lakebase permissions read failed, will try UC: %s", e)
     try:
         from backend.db import execute_query
@@ -2482,10 +2506,11 @@ def _load_user_permissions() -> dict:
             )
             return perms
     except Exception as e:
-        if _table_missing(e):
+        if _table_missing(e) or _permission_store_missing(e):
             logger.debug("Could not load permissions from Delta table (not yet created): %s", e)
         else:
             logger.warning(f"Could not load permissions from Delta table: {e}")
+            read_failed = True
 
     # Fallback: local file (ephemeral — only useful in dev)
     try:
@@ -2501,6 +2526,8 @@ def _load_user_permissions() -> dict:
             return result
     except (json.JSONDecodeError, IOError):
         pass
+    if read_failed:
+        return {"admins": [], "consumers": [], "unavailable": True}
     return {"admins": [], "consumers": []}
 
 
@@ -2660,6 +2687,8 @@ async def save_user_permissions(request: Request, data: UserPermissionsModel) ->
             status_code=503,
             detail="Permission state is temporarily unavailable",
         ) from exc
+    if current_permissions.get("unavailable"):
+        raise HTTPException(status_code=503, detail="Permission state is temporarily unavailable")
     owner = await _permission_owner(current_permissions)
     owner_email = str(owner.get("email") or "").strip().lower()
     if owner_email and owner_email not in {
@@ -3058,7 +3087,7 @@ async def get_pricing_mode() -> dict[str, Any]:
     }
 
 
-@router.put("/pricing-mode")
+@router.put("/pricing-mode", dependencies=[Depends(require_admin)])
 async def set_pricing_mode(data: dict) -> dict[str, Any]:
     """Save the pricing mode setting."""
     use_account_prices = bool(data.get("use_account_prices", False))
@@ -3314,8 +3343,7 @@ def anomaly_spike_threshold() -> float:
 def _is_admin(request: Request) -> bool:
     """Non-raising admin check (mirrors _require_admin's rule)."""
     email = request.headers.get("X-Forwarded-Email", os.getenv("USER", "dev@local"))
-    admins = _load_user_permissions().get("admins", [])
-    return (not admins) or (email in admins)
+    return _is_admin_email(email, _load_user_permissions())
 
 
 # Cheap capability probes cached in-process (avoid a SQL round-trip on every settings load).

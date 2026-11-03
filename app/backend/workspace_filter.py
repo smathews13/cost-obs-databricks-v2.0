@@ -66,19 +66,29 @@ def build_ws_filter_clause(
 
     Uses STRING comparison so both numeric and UUID-format workspace IDs are handled correctly.
     """
-    if id_list is not None:
-        valid = [i for i in id_list if _is_safe_id(i)]
-        if not valid:
-            return ""
-        quoted = ", ".join(f"'{i}'" for i in valid)
-        return f"AND CAST({col} AS STRING) IN ({quoted})"
-    if single_id and _is_safe_id(single_id):
-        return f"AND CAST({col} AS STRING) = '{single_id}'"
-    ids = get_configured_workspace_ids()
-    if not ids:
+    ids = scoped_workspace_ids(id_list, single_id)
+    if ids is None:
         return ""
+    if not ids:
+        return "AND 1 = 0"
     quoted = ", ".join(f"'{i}'" for i in ids)
     return f"AND CAST({col} AS STRING) IN ({quoted})"
+
+
+def scoped_workspace_ids(
+    id_list: list[str] | None = None, single_id: str | None = None
+) -> list[str] | None:
+    """Workspaces a request may see, or None when nothing restricts it.
+
+    The admin-saved pool bounds every request; a caller can narrow it, never widen
+    it. An empty list means the request asked only for workspaces outside the pool.
+    """
+    pool = get_configured_workspace_ids()
+    requested = id_list if id_list is not None else ([single_id] if single_id else None)
+    valid = [i for i in requested or [] if _is_safe_id(i)]
+    if valid:
+        return [i for i in valid if i in set(pool)] if pool else valid
+    return list(pool) if pool else None
 
 
 def pool_cache_tag() -> str:
@@ -97,10 +107,14 @@ def is_workspace_scoped() -> bool:
 
 
 def inject_ws_filter(sql: str, clause: str) -> str:
-    """Inject workspace filter clause after usage_quantity guard in a billing SQL string."""
+    """Inject the workspace filter after every usage_quantity guard in a billing SQL string.
+
+    Queries that UNION SQL and non-SQL usage carry one guard per branch; filtering
+    only the first would leave the other branch unscoped.
+    """
     if not clause:
         return sql
     for anchor in ("AND u.usage_quantity > 0", "AND usage_quantity > 0"):
         if anchor in sql:
-            return sql.replace(anchor, f"{anchor}\n    {clause}", 1)
+            return sql.replace(anchor, f"{anchor}\n    {clause}")
     return sql

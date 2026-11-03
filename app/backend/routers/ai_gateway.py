@@ -269,7 +269,12 @@ def _ws_ids(csv: str | None, repeated: list[str] | None) -> list[str] | None:
 
 def _apply_workspace_filter(sql: str, workspace_ids: list[str] | None, table_alias: str = "") -> tuple[str, dict]:
     """Inject workspace filter and return (sql, extra_params)."""
+    from backend import workspace_filter as wf
+
     prefix = f"{table_alias}." if table_alias else ""
+    workspace_ids = wf.scoped_workspace_ids([str(w) for w in workspace_ids] if workspace_ids else None)
+    if workspace_ids == []:
+        return sql.replace("{workspace_filter}", "AND 1 = 0"), {}
     if workspace_ids:
         placeholders = ", ".join(f":ws_{i}" for i in range(len(workspace_ids)))
         clause = f"AND CAST({prefix}workspace_id AS STRING) IN ({placeholders})"

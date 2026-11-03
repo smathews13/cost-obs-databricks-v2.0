@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 
 from backend.db import _user_token as _db_user_token
 from backend.db import get_workspace_client
@@ -26,6 +26,7 @@ from backend.materialized_views import (
     get_catalog_schema,
     refresh_materialized_views,
 )
+from backend.routers.user import require_admin
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -618,7 +619,7 @@ async def get_setup_status() -> dict[str, Any]:
     }
 
 
-@router.post("/complete")
+@router.post("/complete", dependencies=[Depends(require_admin)])
 async def mark_setup_complete(background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Write setup_done.json and kick off the initial MV build in the background.
 
@@ -663,7 +664,7 @@ async def mark_setup_complete(background_tasks: BackgroundTasks) -> dict[str, An
     return {"ok": True}
 
 
-@router.post("/mark-complete")
+@router.post("/mark-complete", dependencies=[Depends(require_admin)])
 async def mark_setup_complete_manual() -> dict[str, Any]:
     """Mark setup complete WITHOUT triggering a rebuild.
 
@@ -696,7 +697,7 @@ async def mark_setup_complete_manual() -> dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/rerun")
+@router.post("/rerun", dependencies=[Depends(require_admin)])
 async def rerun_setup() -> dict[str, Any]:
     """Clear setup_done.json and reset task state so the wizard shows again.
 
@@ -719,7 +720,7 @@ async def rerun_setup() -> dict[str, Any]:
     return {"ok": True}
 
 
-@router.post("/reset-bootstrap")
+@router.post("/reset-bootstrap", dependencies=[Depends(require_admin)])
 async def reset_bootstrap_state() -> dict[str, Any]:
     """Reset the in-process bootstrap state so auto-init can retry.
 
@@ -884,7 +885,7 @@ def _grant_system_via_user_sql(user_token: str, sp_id: str) -> dict:
             "needs_admin": needs_admin, "obo_scope_missing": obo_scope_missing}
 
 
-@router.post("/grant-sp-system-access")
+@router.post("/grant-sp-system-access", dependencies=[Depends(require_admin)])
 async def grant_sp_system_access(request: Request) -> dict[str, Any]:
     """Re-run all SP grants using the current user's OAuth token.
 
@@ -1017,7 +1018,7 @@ def _verify_built_objects_as_sp(catalog: str, schema: str, skipped: frozenset[st
     return {"ok": len(failed) == 0, "failed": failed, "errors": errors}
 
 
-@router.post("/create-tables")
+@router.post("/create-tables", dependencies=[Depends(require_admin)])
 async def create_tables(
     request: Request,
     background_tasks: BackgroundTasks,
@@ -1283,7 +1284,7 @@ def _create_tables_task(
         logger.error(f"Table creation failed: {e}")
 
 
-@router.post("/refresh-tables")
+@router.post("/refresh-tables", dependencies=[Depends(require_admin)])
 async def refresh_tables(
     background_tasks: BackgroundTasks,
     catalog: str = Query(default=None, description="Target catalog"),
@@ -1379,7 +1380,7 @@ async def get_aws_cur_status() -> dict[str, Any]:
     }
 
 
-@router.post("/aws-cur/create-tables")
+@router.post("/aws-cur/create-tables", dependencies=[Depends(require_admin)])
 async def create_aws_cur_tables(
     background_tasks: BackgroundTasks,
     s3_path: str = Query(default=None, description="S3 path to CUR data (e.g., s3://bucket/cur-reports/)"),
@@ -1449,7 +1450,7 @@ def _create_cur_tables_task(catalog: str, schema: str, s3_path: str | None, load
         logger.error(f"CUR table creation failed: {e}")
 
 
-@router.post("/aws-cur/refresh")
+@router.post("/aws-cur/refresh", dependencies=[Depends(require_admin)])
 async def refresh_aws_cur_tables(
     background_tasks: BackgroundTasks,
     s3_path: str = Query(default=None, description="S3 path to CUR data"),
@@ -1505,9 +1506,13 @@ def _refresh_cur_tables_task(catalog: str, schema: str, s3_path: str | None):
 # ============================================================================
 
 
-@router.post("/bootstrap-admin")
+@router.post("/bootstrap-admin", dependencies=[Depends(require_admin)])
 async def bootstrap_admin(request: Request) -> dict[str, Any]:
-    """Save the deploying user as admin on first-run setup completion."""
+    """Save the deploying user as admin on first-run setup completion.
+
+    Admin-gated: with no admins saved yet everyone passes, so first-run setup works;
+    once admins exist, only an admin can add one here.
+    """
     # X-Forwarded-Email is injected by Databricks Apps on Azure but may be absent on AWS.
     # Fall back to resolving identity from the forwarded OAuth token via the SDK.
     user_email = request.headers.get("X-Forwarded-Email", "")
@@ -1530,6 +1535,8 @@ async def bootstrap_admin(request: Request) -> dict[str, Any]:
         from backend.routers.settings import _load_user_permissions, _save_user_permissions_to_table
 
         perms = _load_user_permissions()
+        if perms.get("unavailable"):
+            return {"status": "error", "message": "Permissions could not be read; not saving admins"}
         if user_email in perms.get("admins", []):
             return {"status": "ok", "email": user_email, "role": "admin", "note": "already admin"}
 
@@ -1663,7 +1670,7 @@ def _grant_user_catalog_visibility(
     }
 
 
-@router.post("/ensure-catalog")
+@router.post("/ensure-catalog", dependencies=[Depends(require_admin)])
 async def ensure_catalog(request: Request) -> dict[str, Any]:
     """Create the target catalog if it doesn't already exist, then grant SP access.
 
@@ -1824,7 +1831,7 @@ async def ensure_catalog(request: Request) -> dict[str, Any]:
     return await loop.run_in_executor(None, _create)
 
 
-@router.post("/ensure-schema")
+@router.post("/ensure-schema", dependencies=[Depends(require_admin)])
 async def ensure_schema(request: Request) -> dict[str, Any]:
     """Create the target schema if it doesn't already exist.
 
@@ -1885,7 +1892,7 @@ async def ensure_schema(request: Request) -> dict[str, Any]:
 # ============================================================================
 
 
-@router.post("/grant-catalog-access")
+@router.post("/grant-catalog-access", dependencies=[Depends(require_admin)])
 async def grant_catalog_access(request: Request) -> dict[str, Any]:
     """Attempt to grant the current user CREATE SCHEMA on the target catalog.
 
@@ -1972,7 +1979,7 @@ async def grant_catalog_access(request: Request) -> dict[str, Any]:
 # ============================================================================
 
 
-@router.post("/generate-token")
+@router.post("/generate-token", dependencies=[Depends(require_admin)])
 async def generate_token() -> dict[str, Any]:
     """Generate a Databricks PAT using the app's OAuth credentials.
 
@@ -2453,7 +2460,7 @@ async def get_readiness(refresh: bool = False) -> dict[str, Any]:
     )
 
 
-@router.get("/list-workspaces")
+@router.get("/list-workspaces", dependencies=[Depends(require_admin)])
 async def list_workspaces() -> dict:
     """Return all workspaces in the account for the setup wizard workspace picker.
 
@@ -2845,7 +2852,7 @@ def _record_drop_in_refresh_log() -> None:
         pass
 
 
-@router.delete("/drop-materialized-views")
+@router.delete("/drop-materialized-views", dependencies=[Depends(require_admin)])
 async def drop_mvs() -> dict:
     """Drop all app-managed materialized view tables. Irreversible — use with caution."""
     try:
@@ -2878,7 +2885,7 @@ async def get_mv_overrides() -> dict:
     return {"tables": tables, "overrides": overrides}
 
 
-@router.post("/mv-overrides")
+@router.post("/mv-overrides", dependencies=[Depends(require_admin)])
 async def save_mv_overrides(request: Request) -> dict:
     """Persist MV table name overrides. Send {} or omit a key to clear an override."""
     from backend.db import save_mv_table_overrides

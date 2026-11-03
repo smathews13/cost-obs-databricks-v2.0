@@ -1193,6 +1193,21 @@ function Dashboard() {
     );
   }
 
+  if (showSetupWizard && user && user.role !== "admin") {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 px-6 text-center" style={{ backgroundColor: '#F9F7F4' }}>
+        <p className="text-base font-semibold" style={{ color: '#1B3139' }}>Setup isn't finished yet</p>
+        <p className="max-w-md text-sm text-gray-600">An app admin needs to complete setup. Until then, some dashboards may be empty or slow.</p>
+        <button
+          onClick={() => setShowSetupWizard(false)}
+          className="rounded-md border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+        >
+          Continue to the dashboard
+        </button>
+      </div>
+    );
+  }
+
   if (showSetupWizard) {
     return (
       <div className="flex min-h-screen items-center justify-center" style={{ backgroundColor: '#F9F7F4' }}>
@@ -1219,6 +1234,9 @@ function Dashboard() {
               Setup incomplete — materialized views have not been created. Data may be slower or incomplete.
             </span>
           </div>
+          {user?.role !== "admin" ? (
+            <span className="shrink-0 text-xs text-orange-800">Ask an app admin to finish setup.</span>
+          ) : (
           <div className="flex shrink-0 items-center gap-2">
             <button
               onClick={() => {
@@ -1242,6 +1260,7 @@ function Dashboard() {
               Resume Setup
             </button>
           </div>
+          )}
         </div>
       )}
 

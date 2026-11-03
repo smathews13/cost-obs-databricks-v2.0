@@ -391,6 +391,7 @@ async def get_billing_by_product(
     results = await asyncio.to_thread(_exec_mv, MV_BILLING_BY_PRODUCT, params, ws_clause)
     if not results:
         live = BILLING_BY_PRODUCT_WORKSPACE if workspace_id else BILLING_BY_PRODUCT
+        live = _inject_ws_filter(live, wf.build_ws_filter_clause(col="u.workspace_id", id_list=id_list))
         results = await asyncio.to_thread(_live_if_allowed, live, params)
 
     products = []
@@ -1524,13 +1525,9 @@ async def get_dashboard_bundle(
 
 
 def _inject_ws_filter(sql: str, clause: str) -> str:
-    """Append a workspace filter clause after the usage_quantity guard in a SQL string."""
-    if not clause:
-        return sql
-    for anchor in ("AND u.usage_quantity > 0", "AND usage_quantity > 0"):
-        if anchor in sql:
-            return sql.replace(anchor, f"{anchor}\n    {clause}", 1)
-    return sql
+    """Append a workspace filter clause after every usage_quantity guard in a SQL string."""
+    from backend import workspace_filter as wf
+    return wf.inject_ws_filter(sql, clause)
 
 
 def _inject_qh_ws_filter(sql: str, clause: str) -> str:
@@ -2661,6 +2658,7 @@ async def get_kpis_bundle(
     SELECT COUNT(DISTINCT executed_by) as unique_query_users
     FROM `{catalog}`.`{schema}`.`dbsql_cost_per_query`
     WHERE start_time >= :start_date AND start_time < DATE_ADD(CAST(:end_date AS DATE), 1)
+    {wf.build_ws_filter_clause(id_list=id_list, col="workspace_id")}
     """
 
     # Direct Delta query for query stats — used as fallback if Lakebase daily_query_stats is empty
@@ -2688,7 +2686,7 @@ async def get_kpis_bundle(
         ("billing_kpis", lambda: gold_read("kpi_billing", PG_KPI_BILLING, params, billing_ws_clause, billing_kpis_sql)),
         ("lakeflow_kpis", lambda: gold_read(
             "kpi_lakeflow", PG_KPI_LAKEFLOW, params, billing_ws_clause,
-            LAKEFLOW_JOB_STATS if live_ok else None,
+            f"{LAKEFLOW_JOB_STATS}  {billing_ws_clause}\n" if live_ok else None,
         )),
         ("anomalies", lambda: gold_read(
             "spend_anomalies", PG_SPEND_ANOMALIES, params, ws_clause,
@@ -2798,7 +2796,10 @@ async def get_kpis_bundle(
             kpis_response["avg_daily_query_users"] = int(val)
 
     total_ws_results = query_results.get("total_workspaces")
-    if total_ws_results and len(total_ws_results) > 0:
+    scoped_ids = wf.scoped_workspace_ids(id_list)
+    if scoped_ids is not None:
+        kpis_response["total_workspace_count"] = len(scoped_ids)
+    elif total_ws_results and len(total_ws_results) > 0:
         kpis_response["total_workspace_count"] = int(total_ws_results[0].get("total_workspaces") or 0)
 
     avg_daily_models_results = query_results.get("avg_daily_models")
