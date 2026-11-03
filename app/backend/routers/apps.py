@@ -145,6 +145,91 @@ WHERE u.usage_date BETWEEN :start_date AND :end_date
 GROUP BY u.usage_metadata.app_id
 """
 
+BILLING_NAME_TTL = 3600
+BILLING_NAME_LOOKBACK_DAYS = 365
+BILLING_NAME_RETRY_SECONDS = 300
+_billing_names: dict[str, str] = {}
+_billing_names_time: float = 0
+_billing_names_refreshing = False
+_billing_names_lock = threading.Lock()
+
+
+def _refresh_billing_names() -> None:
+    global _billing_names_time, _billing_names_refreshing
+    try:
+        today = date.today()
+        rows = execute_query(APPS_BILLING_NAMES, {
+            "start_date": (today - timedelta(days=BILLING_NAME_LOOKBACK_DAYS)).isoformat(),
+            "end_date": today.isoformat(),
+        })
+        names = {
+            str(r["app_id"]): str(r["app_name"])
+            for r in rows or []
+            if r.get("app_id") and r.get("app_name")
+        }
+        with _billing_names_lock:
+            _billing_names.update(names)
+            _billing_names_time = time.time()
+        logger.info("Refreshed billing app names: %d apps", len(names))
+    except Exception as e:
+        logger.warning("Failed to fetch billing app names: %s", e)
+        with _billing_names_lock:
+            _billing_names_time = time.time() - BILLING_NAME_TTL + BILLING_NAME_RETRY_SECONDS
+    finally:
+        with _billing_names_lock:
+            _billing_names_refreshing = False
+
+
+def _billing_app_names(*, wait: bool) -> dict[str, str]:
+    """app_id → name from billing, refreshed hourly.
+
+    Lakebase serving must not wait on the warehouse, so callers pass wait=False
+    there: the refresh runs in the background and names fill in on a later read.
+    """
+    global _billing_names_refreshing
+    with _billing_names_lock:
+        if _billing_names_time and time.time() - _billing_names_time < BILLING_NAME_TTL:
+            return dict(_billing_names)
+        start = not _billing_names_refreshing
+        if start:
+            _billing_names_refreshing = True
+    if start:
+        if wait:
+            _refresh_billing_names()
+        else:
+            threading.Thread(target=_refresh_billing_names, daemon=True, name="apps-billing-names").start()
+    with _billing_names_lock:
+        return dict(_billing_names)
+
+
+def _apply_billing_names(bundle: dict[str, Any], names: dict[str, str]) -> dict[str, Any]:
+    """Replace app ids still shown as names, including in already-cached bundles."""
+    if not names or not isinstance(bundle, dict):
+        return bundle
+    apps_block = bundle.get("apps")
+    apps = apps_block.get("apps") if isinstance(apps_block, dict) else None
+    artifacts = bundle.get("connected_artifacts")
+
+    def _named(items: Any) -> Any:
+        if not isinstance(items, list):
+            return items
+        out = []
+        for item in items:
+            app_id = item.get("app_id") if isinstance(item, dict) else None
+            if app_id and item.get("app_name") == app_id and app_id in names:
+                item = {**item, "app_name": names[app_id]}
+            out.append(item)
+        return out
+
+    named_apps = _named(apps)
+    named_artifacts = _named(artifacts)
+    if named_apps is apps and named_artifacts is artifacts:
+        return bundle
+    result = {**bundle, "connected_artifacts": named_artifacts}
+    if isinstance(apps_block, dict):
+        result["apps"] = {**apps_block, "apps": named_apps}
+    return result
+
 
 # ── Connected artifacts cache ────────────────────────────────────────
 _app_resources_cache: dict[str, list[dict[str, str]]] = {}
@@ -932,7 +1017,7 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
             ("sku_breakdown", lambda: _mv_query("sku_breakdown", MV_APPS_BY_APP_SKU, lambda: execute_query(_ws(APPS_BY_APP_SKU), params))),
             ("workspaces", lambda: _query_app_workspaces(params, ws_clause)),
             ("service_principals", lambda: _gold_sps()),
-            ("app_names", lambda: execute_query(APPS_BILLING_NAMES, params) if live_ok else []),
+            ("app_names", lambda: _billing_app_names(wait=live_ok)),
         ]
 
         results = execute_queries_parallel(queries, 75.0)
@@ -963,11 +1048,7 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
 
         raw_apps = results.get("apps", []) or []
         sku_rows = results.get("sku_breakdown", []) or []
-        billing_names = {
-            str(r["app_id"]): str(r["app_name"])
-            for r in (results.get("app_names") or [])
-            if r.get("app_id") and r.get("app_name")
-        }
+        billing_names = results.get("app_names") or {}
         apps_result = _process_apps(
             raw_apps, active_only, params["end_date"], registry, sku_rows,
             app_workspaces=app_workspace_map, host_ws_id=host_ws_id,
@@ -1025,7 +1106,7 @@ def _compute_apps_bundle(params: dict, id_list: list | None, active_only: bool, 
             if key in seen_sp:
                 continue
             seen_sp.add(key)
-            app_name = registry.get(app_id, {}).get("name", app_id)
+            app_name = registry.get(app_id, {}).get("name") or billing_names.get(app_id, app_id)
             connected_artifacts.append({
                 "app_id": app_id,
                 "app_name": app_name,
@@ -1114,7 +1195,7 @@ async def get_apps_dashboard_bundle(
     if (_dcached := delta_cache_get(_dkey)) is not None:
         if isinstance(_dcached, dict) and "_error" in _dcached:
             raise HTTPException(status_code=500, detail=_dcached.get("_error", "Bundle compute failed"))
-        return _dcached
+        return _apply_billing_names(_dcached, _billing_app_names(wait=False))
 
     with _apps_bundle_inflight_lock:
         if _dkey not in _apps_bundle_inflight:

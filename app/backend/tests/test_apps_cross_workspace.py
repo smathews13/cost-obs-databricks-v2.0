@@ -98,3 +98,69 @@ def test_unregistered_app_billed_only_to_the_host_is_historical_and_counted_once
     assert out["unregistered_summary"]["count"] == 1
     # Two idle registry apps; the deleted app is counted as historical, not inactive too.
     assert out["inactive_count"] == 2
+
+
+def _reset_billing_names(monkeypatch):
+    monkeypatch.setattr(apps, "_billing_names", {})
+    monkeypatch.setattr(apps, "_billing_names_time", 0)
+    monkeypatch.setattr(apps, "_billing_names_refreshing", False)
+
+
+def test_lakebase_serving_fetches_billing_names_in_the_background(monkeypatch):
+    _reset_billing_names(monkeypatch)
+    calls = []
+
+    def fake_query(sql, params):
+        calls.append(params)
+        return [{"app_id": "sports-live", "app_name": "cost-obs-sports-prod"}]
+
+    started = []
+
+    class FakeThread:
+        def __init__(self, target, **_kw):
+            self.target = target
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(apps, "execute_query", fake_query)
+    monkeypatch.setattr(apps.threading, "Thread", FakeThread)
+
+    assert apps._billing_app_names(wait=False) == {}
+    assert len(started) == 1 and calls == []
+    assert apps._billing_app_names(wait=False) == {}
+    assert len(started) == 1  # one refresh at a time
+
+    started[0].target()
+    assert apps._billing_app_names(wait=False) == {"sports-live": "cost-obs-sports-prod"}
+    assert len(calls) == 1
+
+
+def test_failed_billing_name_lookup_backs_off(monkeypatch):
+    _reset_billing_names(monkeypatch)
+
+    def boom(sql, params):
+        raise RuntimeError("warehouse down")
+
+    monkeypatch.setattr(apps, "execute_query", boom)
+    assert apps._billing_app_names(wait=True) == {}
+    retry_in = apps._billing_names_time + apps.BILLING_NAME_TTL - apps.time.time()
+    assert 0 < retry_in <= apps.BILLING_NAME_RETRY_SECONDS
+
+
+def test_cached_bundle_gets_names_for_apps_still_shown_by_id():
+    bundle = {
+        "apps": {
+            "apps": [
+                {"app_id": "sports-live", "app_name": "sports-live"},
+                {"app_id": "host-app-id", "app_name": "agent-0"},
+            ]
+        },
+        "connected_artifacts": [{"app_id": "sports-live", "app_name": "sports-live"}],
+    }
+    out = apps._apply_billing_names(
+        bundle, {"sports-live": "cost-obs-sports-prod", "host-app-id": "x"}
+    )
+    assert [a["app_name"] for a in out["apps"]["apps"]] == ["cost-obs-sports-prod", "agent-0"]
+    assert out["connected_artifacts"][0]["app_name"] == "cost-obs-sports-prod"
+    assert bundle["apps"]["apps"][0]["app_name"] == "sports-live"  # cached copy untouched
