@@ -34,7 +34,6 @@ from backend.routers import (
     settings,
     setup,
     tagging,
-    use_cases,
     user,
     users_groups,
     warehouse_health,
@@ -1021,7 +1020,6 @@ app.include_router(aws_actual.router, prefix="/api/aws-actual", tags=["aws-actua
 app.include_router(azure_actual.router, prefix="/api/azure-actual", tags=["azure-actual"])
 app.include_router(gcp_actual.router, prefix="/api/gcp-actual", tags=["gcp-actual"])
 app.include_router(dbsql.router, prefix="/api/dbsql", tags=["dbsql"])
-app.include_router(use_cases.router, prefix="/api/use-cases", tags=["use-cases"])
 app.include_router(permissions.router, prefix="/api/permissions", tags=["permissions"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(users_groups.router, prefix="/api/users-groups", tags=["users-groups"])

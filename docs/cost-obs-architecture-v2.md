@@ -136,7 +136,7 @@ The Cloud Costs view’s default path is a **computed VM / cluster infrastructur
 | Cloud Costs | Estimated classic VM / cluster infrastructure | `daily_infra_cluster_spend` |
 | Optimize | Warehouse health and rightsizing findings | `warehouse_optimizer_findings`, `daily_dbsql_region_scope` |
 
-Optional use-case tracking is a settings-gated tab and uses the same Lakebase-first pattern when enabled.
+Use-case tracking is deprecated and removed from the app. Its router, queries and table definitions remain in the codebase but are not mounted.
 
 ## Deployment lifecycle
 

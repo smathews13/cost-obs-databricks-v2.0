@@ -7,7 +7,6 @@ const TAB_LABELS: Record<keyof TabVisibility, { label: string; color: string }> 
   genie: { label: "Genie", color: "#FF3621" },
   apps: { label: "Apps", color: "#FF3621" },
   tagging: { label: "Tagging", color: "#FF3621" },
-  "use-cases": { label: "Use Cases", color: "#FF3621" },
   "users-groups": { label: "Users", color: "#FF3621" },
   kpis: { label: "Platform KPIs & Trends", color: "#FF3621" },
   infra: { label: "Cloud Costs", color: "#FF3621" },
@@ -19,20 +18,16 @@ interface SettingsTabsProps {
   localVisibility: TabVisibility;
   toggleTab: (key: keyof TabVisibility) => void;
   visibleCount: number;
-  enableUseCaseTracking?: boolean;
 }
 
-export function SettingsTabs({ localVisibility, toggleTab, visibleCount, enableUseCaseTracking }: SettingsTabsProps) {
+export function SettingsTabs({ localVisibility, toggleTab, visibleCount }: SettingsTabsProps) {
   return (
     <div>
       <p className="mb-3 text-sm text-gray-500">
         Toggle which tabs are visible in the dashboard. At least one tab must remain visible.
       </p>
       <div className="space-y-1.5">
-        {(Object.keys(TAB_LABELS) as Array<keyof TabVisibility>).filter((key) => {
-          if (key === "use-cases" && !enableUseCaseTracking) return false;
-          return true;
-        }).map((key) => {
+        {(Object.keys(TAB_LABELS) as Array<keyof TabVisibility>).map((key) => {
           const { label, color } = TAB_LABELS[key];
           const checked = localVisibility[key];
           return (

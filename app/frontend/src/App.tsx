@@ -59,7 +59,6 @@ const WarehouseRightsizingView = lazy(() => lazyWithRetry(() => import("@/compon
 const WarehouseIdleTimeView = lazy(() => lazyWithRetry(() => import("@/components/SQLWarehousing360").then(m => ({ default: m.WarehouseIdleTimeView }))));
 const OptimizeMethodologyPanel = lazy(() => lazyWithRetry(() => import("@/components/SQLWarehousing360").then(m => ({ default: m.OptimizeMethodologyPanel }))));
 // ForecastingView removed from active app (internal-only; excluded from external mirror)
-const UseCases = lazy(() => lazyWithRetry(() => import("@/pages/UseCases")));
 const UsersGroups = lazy(() => lazyWithRetry(() => import("@/pages/UsersGroups")));
 // BudgetView removed from active app (internal-only; excluded from external mirror)
 const ConversationalDrawer = lazy(() => lazyWithRetry(() => import("@/components/ConversationalDrawer").then(m => ({ default: m.ConversationalDrawer }))));
@@ -77,7 +76,6 @@ function preloadTabChunks() {
   import("@/components/AppsCostCenter");
   import("@/components/TaggingHub");
   import("@/components/SQLWarehousing360");
-  import("@/pages/UseCases");
   import("@/pages/UsersGroups");
 }
 
@@ -124,7 +122,7 @@ function useKeepAlive() {
 // (V2.1_SPEC §4.3). "aiml" is no longer a top-level tab value.
 type InfraClusterWithWorkspace = InfraClusterCost & { workspace_id?: string | null; workspace_name?: string | null };
 
-type ViewTab = "dbu" | "sql" | "infra" | "optimizer" | "kpis" | "ai-gateway" | "genie" | "apps" | "tagging" | "use-cases" | "users-groups";
+type ViewTab = "dbu" | "sql" | "infra" | "optimizer" | "kpis" | "ai-gateway" | "genie" | "apps" | "tagging" | "users-groups";
 
 const DASHBOARD_TABS: Array<{ id: ViewTab; label: string; icon: React.ReactNode }> = [
   {
@@ -190,7 +188,6 @@ const TAB_LOADING_SECTIONS: Record<ViewTab, string[]> = {
   apps: ["Apps Spend Over Time", "Apps by Spend", "Connected Resources"],
   tagging: ["Total Tag Coverage", "Tag Coverage Over Time", "Top Tags", "Spend by Key", "Untagged Resources"],
   "users-groups": ["Top Users by Spend", "User Spend by Product", "User Activity", "Service Principal Activity"],
-  "use-cases": ["Use Cases"],
 };
 
 export function DashboardTabNavigation({
@@ -927,11 +924,6 @@ function Dashboard() {
     enabled: activeTab === "optimizer" || requiredExportTabs.includes("optimizer"),
   });
 
-  // Use Cases tab data - only fetch when feature is enabled
-  const useCasesEnabled = appSettings.enableUseCaseTracking;
-  useQuery({ queryKey: ["use-cases"], queryFn: async () => { const r = await fetch("/api/use-cases/use-cases?status=active"); if (!r.ok) throw new Error("Failed"); return r.json(); }, enabled: useCasesEnabled });
-  useQuery({ queryKey: ["use-cases-summary"], queryFn: async () => { const r = await fetch("/api/use-cases/analytics/summary"); if (!r.ok) throw new Error("Failed"); return r.json(); }, enabled: useCasesEnabled });
-  useQuery({ queryKey: ["monthly-consumption"], queryFn: async () => { const r = await fetch("/api/use-cases/monthly-consumption"); if (!r.ok) throw new Error("Failed"); return r.json(); }, enabled: useCasesEnabled });
   useQuery({ queryKey: ["available-tags"], queryFn: async () => { const r = await fetch("/api/tagging/available-tags"); if (!r.ok) return { tags: {}, count: 0 }; return r.json(); } });
 
   // Workspace list for the filter dropdown — pool-scoped, independent of the bundle.
@@ -1667,8 +1659,6 @@ function Dashboard() {
             workspaceNameMap={workspaceNameMap}
           />
           </TabErrorBoundary>
-        ) : activeTab === "use-cases" ? (
-          <TabErrorBoundary tabName="Use Cases"><UseCases /></TabErrorBoundary>
         ) : activeTab === "users-groups" ? (
           <TabErrorBoundary tabName="Users">
           <UsersGroups
@@ -1692,10 +1682,7 @@ function Dashboard() {
         isOpen={showExportDialog}
         onClose={closeExportDialog}
         onExport={handleExport}
-        tabVisibility={{
-          ...tabVisibility,
-          "use-cases": tabVisibility["use-cases"] && appSettings.enableUseCaseTracking,
-        }}
+        tabVisibility={tabVisibility}
         dataLoading={exportDataLoading}
         dataPrepared={exportPrepared}
         requiredTabs={requiredExportTabs}

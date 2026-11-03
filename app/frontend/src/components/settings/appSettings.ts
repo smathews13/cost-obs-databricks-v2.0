@@ -8,7 +8,6 @@ export interface TabVisibility {
   sql: boolean;
   apps: boolean;
   tagging: boolean;
-  "use-cases": boolean;
   "users-groups": boolean;
   conversational: boolean;
 }
@@ -24,7 +23,6 @@ export const DASHBOARD_TAB_ORDER: Array<keyof TabVisibility> = [
   "kpis",
   "infra",
   "optimizer",
-  "use-cases",
 ];
 
 export function firstVisibleDashboardTab(visibility: TabVisibility): keyof TabVisibility {
@@ -33,7 +31,7 @@ export function firstVisibleDashboardTab(visibility: TabVisibility): keyof TabVi
 
 export const DEFAULT_VISIBILITY: TabVisibility = {
   dbu: true, infra: true, optimizer: true, kpis: true, "ai-gateway": true, genie: true,
-  sql: true, apps: true, tagging: true, "use-cases": false, "users-groups": true, conversational: true,
+  sql: true, apps: true, tagging: true, "users-groups": true, conversational: true,
 };
 
 const STORAGE_KEY = "coc-tab-visibility";
@@ -41,7 +39,15 @@ const STORAGE_KEY = "coc-tab-visibility";
 export function loadTabVisibility(): TabVisibility {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) return { ...DEFAULT_VISIBILITY, ...JSON.parse(stored) };
+    if (stored) {
+      // Saved settings can hold tabs that no longer exist (e.g. the retired Use Cases tab).
+      const parsed = JSON.parse(stored) as Record<string, unknown>;
+      const merged = { ...DEFAULT_VISIBILITY };
+      for (const key of Object.keys(DEFAULT_VISIBILITY) as (keyof TabVisibility)[]) {
+        if (typeof parsed[key] === "boolean") merged[key] = parsed[key] as boolean;
+      }
+      return merged;
+    }
   } catch { /* ignore */ }
   return DEFAULT_VISIBILITY;
 }
@@ -74,7 +80,6 @@ export interface AppSettings {
   alertWorkspaceBudget: number;
   slackWebhookUrl: string;
   enableAppHostingComparison: boolean;
-  enableUseCaseTracking: boolean;
   enableAccuracyChecks: boolean;
   anonymizeUsers: boolean;
 }
@@ -102,7 +107,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   alertWorkspaceBudget: 10000,
   slackWebhookUrl: "",
   enableAppHostingComparison: false,
-  enableUseCaseTracking: false,
   enableAccuracyChecks: false,
   anonymizeUsers: false,
 };

@@ -50,7 +50,6 @@ const tabLabels: Record<keyof TabVisibility, string> = {
   kpis: "KPIs & Trends",
   infra: "Cloud Costs",
   optimizer: "Optimize",
-  "use-cases": "Use Cases",
   conversational: "Ask Genie",
 };
 

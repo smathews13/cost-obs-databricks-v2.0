@@ -633,7 +633,6 @@ async def clear_cache(tab: str | None = None) -> dict[str, Any]:
       tagging      → clears tagging queries
       sql          → clears dbsql and sql-breakdown queries
       users-groups → clears users-groups queries
-      use-cases    → clears use-cases queries
       alerts       → clears alerts queries
       (none)       → clears entire cache
     """
@@ -648,7 +647,6 @@ async def clear_cache(tab: str | None = None) -> dict[str, Any]:
         "tagging":      ["tagging"],
         "sql":          ["dbsql", "sql-breakdown"],
         "users-groups": ["users-groups"],
-        "use-cases":    ["use-cases", "use_case", "monthly-consumption"],
         "alerts":       ["alerts"],
     }
 

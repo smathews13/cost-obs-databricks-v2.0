@@ -1,4 +1,9 @@
-"""API endpoints for use case management and tracking."""
+"""API endpoints for use case management and tracking.
+
+Deprecated: Use Cases is retired from the app and this router is not mounted.
+The request models, queries and table definitions are kept in case the feature
+returns; mounting it again would also need the admin checks other write routes have.
+"""
 
 import asyncio
 import logging

@@ -548,7 +548,7 @@ cost-obs-databricks/
 │       ├── aws_actual.py        # AWS CUR actual cost queries
 │       ├── azure_actual.py      # Azure actual cost queries
 │       ├── alerts.py            # Threshold alerts and notifications
-│       ├── use_cases.py         # Business use case tracking
+│       ├── use_cases.py         # Deprecated use case tracking (not mounted)
 │       ├── users_groups.py      # User spend analytics
 │       ├── settings.py          # App config, cloud connections, user permissions
 │       └── setup.py             # First-run setup wizard

@@ -3219,7 +3219,7 @@ async def get_account_price_multiplier(
 
 _DEFAULT_TAB_VISIBILITY: dict = {
     "dbu": True, "infra": True, "optimizer": True, "kpis": True, "aiml": True,
-    "sql": True, "apps": True, "tagging": True, "use-cases": False, "users-groups": True,
+    "sql": True, "apps": True, "tagging": True, "users-groups": True,
 }
 
 _APP_SETTINGS_DEFAULTS: dict = {
@@ -3237,7 +3237,6 @@ _APP_SETTINGS_DEFAULTS: dict = {
     "enable_architecture_view": True,
     "enable_mv_share_runbook": True,
     "feedback_slack_url": "",
-    "enable_use_case_tracking": False,
     "enable_accuracy_checks": False,
     "tab_visibility": _DEFAULT_TAB_VISIBILITY,
 }
@@ -3389,7 +3388,7 @@ def _settings_snapshot(request: Request) -> dict:
     general_keys = (
         "company_name", "app_display_name", "default_date_range_days", "default_landing_tab",
         "auto_refresh_minutes", "density", "theme", "show_workspace_names",
-        "enable_use_case_tracking", "enable_accuracy_checks",
+        "enable_accuracy_checks",
     )
     return {
         "general": {k: app.get(k) for k in general_keys},
@@ -3433,7 +3432,7 @@ async def put_unified_settings(request: Request) -> dict:
             for k in (
                 "company_name", "app_display_name", "default_date_range_days", "default_landing_tab",
                 "auto_refresh_minutes", "density", "theme", "show_workspace_names",
-                "enable_use_case_tracking", "enable_accuracy_checks",
+                "enable_accuracy_checks",
             ):
                 if k in general:
                     app_partial[k] = general[k]

@@ -118,7 +118,6 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
       density: (g.density as AppSettings["density"]) ?? prev.density,
       theme: (g.theme as AppSettings["theme"]) ?? prev.theme,
       showWorkspaceNames: typeof g.show_workspace_names === "boolean" ? g.show_workspace_names : prev.showWorkspaceNames,
-      enableUseCaseTracking: typeof g.enable_use_case_tracking === "boolean" ? g.enable_use_case_tracking : prev.enableUseCaseTracking,
       enableAccuracyChecks: typeof g.enable_accuracy_checks === "boolean" ? g.enable_accuracy_checks : prev.enableAccuracyChecks,
       alertSpikePercent: num(unified.thresholds?.spike_threshold_percent, prev.alertSpikePercent),
       alertDailyBudget: num(unified.thresholds?.daily_budget, prev.alertDailyBudget),
@@ -129,7 +128,16 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
       enableArchitectureView: unified.experimental?.enable_architecture_view ?? prev.enableArchitectureView,
       enableMvShareRunbook: unified.experimental?.enable_mv_share_runbook ?? prev.enableMvShareRunbook,
     }));
-    if (unified.tab_visibility) setLocalVisibility((prev) => ({ ...prev, ...unified.tab_visibility }));
+    const savedTabs = unified.tab_visibility;
+    if (savedTabs) {
+      setLocalVisibility((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(prev) as (keyof TabVisibility)[]) {
+          if (typeof savedTabs[key] === "boolean") next[key] = savedTabs[key] as boolean;
+        }
+        return next;
+      });
+    }
   }
 
   // Prefer a real display name; never show the raw SP client-id UUID. Falls back to
@@ -206,7 +214,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
         default_date_range_days: settings.defaultDateRangeDays, default_landing_tab: settings.defaultLandingTab,
         auto_refresh_minutes: settings.refreshIntervalMinutes, density: settings.density, theme: settings.theme,
         show_workspace_names: settings.showWorkspaceNames,
-        enable_use_case_tracking: settings.enableUseCaseTracking, enable_accuracy_checks: settings.enableAccuracyChecks,
+        enable_accuracy_checks: settings.enableAccuracyChecks,
       },
       tab_visibility: localVisibility,
       thresholds: {
@@ -253,7 +261,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
           default_date_range_days: d.defaultDateRangeDays, default_landing_tab: d.defaultLandingTab,
           auto_refresh_minutes: d.refreshIntervalMinutes, density: d.density, theme: d.theme,
           show_workspace_names: d.showWorkspaceNames,
-          enable_use_case_tracking: d.enableUseCaseTracking, enable_accuracy_checks: d.enableAccuracyChecks,
+          enable_accuracy_checks: d.enableAccuracyChecks,
         },
         tab_visibility: DEFAULT_VISIBILITY,
         thresholds: {
@@ -351,7 +359,7 @@ function SettingsShell({ onClose, onTabVisibilityChange, onSettingsChange, tabVi
               {overlay === "accuracy" && <SettingsAccuracyChecks />}
 
               {!overlay && nav === "general" && <GeneralSection localSettings={localSettings} updateSetting={updateSetting} tabVisibility={localVisibility} caps={caps} />}
-              {!overlay && nav === "tabs" && <DashboardTabsSection localVisibility={localVisibility} toggleTab={toggleTab} enableUseCaseTracking={localSettings.enableUseCaseTracking} />}
+              {!overlay && nav === "tabs" && <DashboardTabsSection localVisibility={localVisibility} toggleTab={toggleTab} />}
               {!overlay && nav === "alerts" && <AlertsSection localSettings={localSettings} updateSetting={updateSetting} caps={caps} />}
               {!overlay && nav === "data" && <DataTablesSection localSettings={localSettings} updateSetting={updateSetting} caps={caps} />}
               {!overlay && nav === "scope" && isAdmin && <WorkspaceScopeSection />}

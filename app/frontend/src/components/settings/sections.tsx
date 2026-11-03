@@ -15,11 +15,11 @@ import { useToast } from "./toast";
 const TAB_LABELS: Record<keyof TabVisibility, string> = {
   dbu: "$DBU Spend", sql: "SQL", "ai-gateway": "Unity Gateway", genie: "Genie", apps: "Apps",
   tagging: "Tagging", "users-groups": "Users", kpis: "Platform KPIs & Trends",
-  infra: "Cloud Costs", optimizer: "Optimize", "use-cases": "Use Cases",
+  infra: "Cloud Costs", optimizer: "Optimize",
   conversational: "Ask Genie (conversational surface)",
 };
-// Always-shown, landing-eligible main tabs (the ViewTab set, minus the conditional
-// use-cases and the conversational overlay which isn't a landing destination).
+// Landing-eligible main tabs (the ViewTab set, minus the conversational overlay
+// which isn't a landing destination).
 const TAB_ORDER: (keyof TabVisibility)[] = ["dbu", "sql", "ai-gateway", "genie", "apps", "tagging", "users-groups", "kpis", "infra", "optimizer"];
 
 const ext = (
@@ -120,16 +120,12 @@ export function GeneralSection({ localSettings, updateSetting, tabVisibility, ca
 }
 
 // ── Dashboard tabs ────────────────────────────────────────────────────────────
-export function DashboardTabsSection({ localVisibility, toggleTab, enableUseCaseTracking }: {
-  localVisibility: TabVisibility; toggleTab: (k: keyof TabVisibility) => void; enableUseCaseTracking?: boolean;
+export function DashboardTabsSection({ localVisibility, toggleTab }: {
+  localVisibility: TabVisibility; toggleTab: (k: keyof TabVisibility) => void;
 }) {
   const toast = useToast();
-  // Full toggle list: main tabs + conditional use-cases + the conversational overlay.
-  const keys = [
-    ...TAB_ORDER,
-    ...(enableUseCaseTracking ? (["use-cases"] as (keyof TabVisibility)[]) : []),
-    "conversational" as keyof TabVisibility,
-  ];
+  // Full toggle list: main tabs + the conversational overlay.
+  const keys = [...TAB_ORDER, "conversational" as keyof TabVisibility];
   const visibleCount = keys.filter((k) => localVisibility[k]).length;
   return (
     <div>
