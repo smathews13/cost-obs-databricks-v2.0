@@ -2186,10 +2186,10 @@ async def create_cloud_connection(request: Request, conn: CloudConnectionCreate)
 
 # Keep legacy endpoint for backward compatibility
 @router.post("/azure-connections", dependencies=[Depends(require_admin)])
-async def create_azure_connection(conn: CloudConnectionCreate):
+async def create_azure_connection(request: Request, conn: CloudConnectionCreate):
     """Create an Azure connection (legacy endpoint)."""
     conn.provider = "azure"
-    return await create_cloud_connection(conn)
+    return await create_cloud_connection(request, conn)
 
 
 @router.delete("/cloud-connections/{connection_id}")
@@ -2214,9 +2214,9 @@ async def delete_cloud_connection(request: Request, connection_id: str):
 
 # Keep legacy endpoint for backward compatibility
 @router.delete("/azure-connections/{connection_id}", dependencies=[Depends(require_admin)])
-async def delete_azure_connection(connection_id: str):
+async def delete_azure_connection(request: Request, connection_id: str):
     """Delete an Azure connection (legacy endpoint)."""
-    return await delete_cloud_connection(connection_id)
+    return await delete_cloud_connection(request, connection_id)
 
 
 # ── Webhook Settings ─────────────────────────────────────────────────────

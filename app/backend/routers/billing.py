@@ -243,6 +243,12 @@ def _mv_ws_clause(id_list: list[str] | None) -> str:
     return wf.build_ws_filter_clause(col="workspace_id", id_list=id_list)
 
 
+def _pool_scoped(sql: str) -> str:
+    """Live billing SQL (aliased `u`) limited to the admin-saved workspace scope."""
+    from backend import workspace_filter as wf
+    return wf.inject_ws_filter(sql, wf.build_ws_filter_clause(col="u.workspace_id"))
+
+
 def get_workspace_name() -> str | None:
     """Get workspace name from Databricks SDK."""
     try:
@@ -435,7 +441,7 @@ async def get_billing_by_workspace(
     }
 
     # Always use the live query here — the MV lacks top_products and top_users columns.
-    results = await asyncio.to_thread(execute_query, BILLING_BY_WORKSPACE, params)
+    results = await asyncio.to_thread(execute_query, _pool_scoped(BILLING_BY_WORKSPACE), params)
     return _format_workspaces(results, params)
 
 
@@ -450,7 +456,7 @@ async def get_billing_timeseries(
         "end_date": end_date or get_default_end_date(),
     }
 
-    results = await asyncio.to_thread(execute_query, BILLING_TIMESERIES, params)
+    results = await asyncio.to_thread(execute_query, _pool_scoped(BILLING_TIMESERIES), params)
 
     # Transform to chart-friendly format: [{date, SQL, ETL, Interactive, ...}, ...]
     date_data: dict[str, dict[str, float]] = {}
@@ -560,9 +566,9 @@ async def get_etl_breakdown(
         "end_date": end_date or get_default_end_date(),
     }
 
-    results = await asyncio.to_thread(_exec_mv, MV_ETL_BREAKDOWN, params, "")
+    results = await asyncio.to_thread(_exec_mv, MV_ETL_BREAKDOWN, params, _mv_ws_clause(None))
     if not results:
-        results = await asyncio.to_thread(_live_if_allowed, ETL_BREAKDOWN, params)
+        results = await asyncio.to_thread(_live_if_allowed, _pool_scoped(ETL_BREAKDOWN), params)
 
     products = []
     total_spend = 0
@@ -778,7 +784,8 @@ async def get_infra_costs(
         # Single query — instance families are derived in Python from cluster results
         from backend.lakebase_read import PG_INFRA_CLUSTERS, gold_read
         cluster_results = await asyncio.to_thread(
-            gold_read, "infra_clusters", PG_INFRA_CLUSTERS, params, "", INFRA_COST_ESTIMATE
+            gold_read, "infra_clusters", PG_INFRA_CLUSTERS, params, _mv_ws_clause(None),
+            _pool_scoped(INFRA_COST_ESTIMATE),
         )
 
         # Detect cloud from results, fall back to host URL detection
@@ -899,7 +906,8 @@ async def get_infra_costs_timeseries(
     try:
         from backend.lakebase_read import PG_INFRA_TIMESERIES, gold_read
         results = await asyncio.to_thread(
-            gold_read, "infra_timeseries", PG_INFRA_TIMESERIES, params, "", INFRA_COST_TIMESERIES
+            gold_read, "infra_timeseries", PG_INFRA_TIMESERIES, params, _mv_ws_clause(None),
+            _pool_scoped(INFRA_COST_TIMESERIES),
         )
 
         # Detect cloud from host URL, override with billing data if available
@@ -1289,7 +1297,8 @@ async def get_aws_costs(
         # Get detailed cluster costs
         from backend.lakebase_read import PG_INFRA_CLUSTERS, gold_read
         cluster_results = await asyncio.to_thread(
-            gold_read, "infra_clusters", PG_INFRA_CLUSTERS, params, "", AWS_COST_ESTIMATE
+            gold_read, "infra_clusters", PG_INFRA_CLUSTERS, params, _mv_ws_clause(None),
+            _pool_scoped(AWS_COST_ESTIMATE),
         )
 
         clusters = []
@@ -1371,7 +1380,8 @@ async def get_aws_costs_timeseries(
     try:
         from backend.lakebase_read import PG_INFRA_TIMESERIES, gold_read
         results = await asyncio.to_thread(
-            gold_read, "infra_timeseries", PG_INFRA_TIMESERIES, params, "", AWS_COST_TIMESERIES
+            gold_read, "infra_timeseries", PG_INFRA_TIMESERIES, params, _mv_ws_clause(None),
+            _pool_scoped(AWS_COST_TIMESERIES),
         )
         return _format_aws_timeseries(results, params)
     except Exception as e:
@@ -1473,17 +1483,22 @@ async def get_dashboard_bundle(
     from backend.lakebase_read import PG_INFRA_CLUSTERS, PG_INFRA_TIMESERIES, gold_read
 
     # Execute all queries in parallel
+    gold_ws = _mv_ws_clause(None)
     queries = [
-        ("summary", lambda: execute_query(BILLING_SUMMARY, params)),
-        ("products", lambda: execute_query(BILLING_BY_PRODUCT, params)),
-        ("workspaces", lambda: execute_query(BILLING_BY_WORKSPACE, params)),
-        ("timeseries", lambda: execute_query(BILLING_TIMESERIES, params)),
-        ("sql_breakdown", lambda: execute_query(SQL_TOOL_ATTRIBUTION, params)),
-        ("etl_breakdown", lambda: execute_query(ETL_BREAKDOWN, params)),
-        ("pipeline_objects", lambda: _enrich_pipeline_results(execute_query(PIPELINE_OBJECTS, params))),
-        ("interactive", lambda: execute_query(INTERACTIVE_BREAKDOWN, params)),
-        ("aws_clusters", lambda: gold_read("infra_clusters", PG_INFRA_CLUSTERS, params, "", AWS_COST_ESTIMATE)),
-        ("aws_timeseries", lambda: gold_read("infra_timeseries", PG_INFRA_TIMESERIES, params, "", AWS_COST_TIMESERIES)),
+        ("summary", lambda: execute_query(_pool_scoped(BILLING_SUMMARY), params)),
+        ("products", lambda: execute_query(_pool_scoped(BILLING_BY_PRODUCT), params)),
+        ("workspaces", lambda: execute_query(_pool_scoped(BILLING_BY_WORKSPACE), params)),
+        ("timeseries", lambda: execute_query(_pool_scoped(BILLING_TIMESERIES), params)),
+        ("sql_breakdown", lambda: execute_query(_pool_scoped(SQL_TOOL_ATTRIBUTION), params)),
+        ("etl_breakdown", lambda: execute_query(_pool_scoped(ETL_BREAKDOWN), params)),
+        ("pipeline_objects", lambda: _enrich_pipeline_results(execute_query(_pool_scoped(PIPELINE_OBJECTS), params))),
+        ("interactive", lambda: execute_query(_pool_scoped(INTERACTIVE_BREAKDOWN), params)),
+        ("aws_clusters", lambda: gold_read(
+            "infra_clusters", PG_INFRA_CLUSTERS, params, gold_ws, _pool_scoped(AWS_COST_ESTIMATE),
+        )),
+        ("aws_timeseries", lambda: gold_read(
+            "infra_timeseries", PG_INFRA_TIMESERIES, params, gold_ws, _pool_scoped(AWS_COST_TIMESERIES),
+        )),
     ]
 
     try:
@@ -2413,7 +2428,7 @@ async def get_spend_by_user_group(
             GROUP BY 1
             HAVING SUM(u.usage_quantity * COALESCE(p.pricing.default, 0)) > 0
             """
-            user_results = await asyncio.to_thread(execute_query, user_query, params)
+            user_results = await asyncio.to_thread(execute_query, _pool_scoped(user_query), params)
 
             # Aggregate spend by group
             group_spend: dict[str, dict] = {}
@@ -2461,7 +2476,7 @@ async def get_spend_by_user_group(
         LIMIT 15
         """
         try:
-            results = await asyncio.to_thread(execute_query, query, params)
+            results = await asyncio.to_thread(execute_query, _pool_scoped(query), params)
         except Exception as e:
             logger.warning(f"User spend query failed: {e}")
             return {"groups": [], "total_spend": 0, "error": str(e)}
@@ -2506,7 +2521,7 @@ async def get_spend_anomalies(
         "end_date": end_date or get_default_end_date(),
     }
 
-    results = await asyncio.to_thread(execute_query, SPEND_ANOMALIES, params)
+    results = await asyncio.to_thread(execute_query, _pool_scoped(SPEND_ANOMALIES), params)
 
     # Effective spike threshold folds in the admin's anomaly-sensitivity setting
     # (low/medium/high → base threshold × 1.5/1.0/0.5). Additive: each row is flagged
@@ -2584,7 +2599,7 @@ async def get_platform_kpis(
     if use_mv:
         # Try to get query stats from materialized view (fast!)
         try:
-            mv_results = await asyncio.to_thread(_exec_mv, MV_PLATFORM_KPIS, params)
+            mv_results = await asyncio.to_thread(_exec_mv, MV_PLATFORM_KPIS, params, _mv_ws_clause(None))
             if mv_results and len(mv_results) > 0:
                 mv_row = mv_results[0]
                 response["total_queries"] = int(mv_row.get("total_queries") or 0)
@@ -2596,12 +2611,15 @@ async def get_platform_kpis(
         except Exception as e:
             logger.debug(f"MV query stats failed: {e}")
 
+    from backend import workspace_filter as wf
     from backend.lakebase_read import PG_KPI_BILLING, gold_read, warehouse_view_fallback
+    live_kpis = None
+    # The live KPI SQL counts query history and job runs straight from system tables,
+    # which the scope filter can't reach, so a scoped app reads only the gold copy.
+    if warehouse_view_fallback() and not wf.is_workspace_scoped():
+        live_kpis = PLATFORM_KPIS_FAST if (fast or use_mv) else PLATFORM_KPIS
     results = await asyncio.to_thread(
-        gold_read, "kpi_billing", PG_KPI_BILLING, params, "",
-        PLATFORM_KPIS_FAST if (fast or use_mv) and warehouse_view_fallback() else (
-            PLATFORM_KPIS if warehouse_view_fallback() else None
-        ),
+        gold_read, "kpi_billing", PG_KPI_BILLING, params, _mv_ws_clause(None), live_kpis,
     )
 
     if results and len(results) > 0:

@@ -69,6 +69,27 @@ def test_consumers_cannot_change_app_setup(client, monkeypatch, method, path):
     assert called == []
 
 
+def test_legacy_azure_connection_routes_work_for_admins(client, monkeypatch):
+    _as(monkeypatch, "admin")
+    store: list[dict] = []
+    monkeypatch.setattr(settings, "_require_admin", lambda request: "admin@example.com")
+    monkeypatch.setattr(settings, "_load_connections", lambda: list(store))
+    monkeypatch.setattr(settings, "_upsert_connection_to_table", lambda conn: None)
+    monkeypatch.setattr(settings, "_delete_connection_from_table", lambda cid: None)
+    monkeypatch.setattr(settings, "_save_connections_to_file", lambda conns: store.__setitem__(slice(None), conns))
+    headers = {"X-Forwarded-Email": "admin@example.com"}
+
+    created = client.post(
+        "/api/settings/azure-connections", json={"name": "prod", "provider": "aws"}, headers=headers
+    )
+    assert created.status_code == 200
+    assert created.json()["provider"] == "azure"
+
+    deleted = client.delete(f"/api/settings/azure-connections/{created.json()['id']}", headers=headers)
+    assert deleted.status_code == 200
+    assert store == []
+
+
 def test_admins_pass_the_admin_check(client, monkeypatch):
     _as(monkeypatch, "admin")
     res = client.post(
