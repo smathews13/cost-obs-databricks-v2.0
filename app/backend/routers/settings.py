@@ -7,6 +7,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -287,17 +288,32 @@ def _refresh_log_path() -> str:
     return os.path.join(os.path.dirname(__file__), "..", "..", ".settings", "mv_refresh_log.json")
 
 
-def _write_refresh_log_file(log_data: dict) -> None:
+@contextmanager
+def refresh_log_lock():
+    """Serialize read-modify-write of the refresh log across both workers."""
+    import fcntl
+    path = _refresh_log_path() + ".lock"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def write_refresh_log_file(log_data: dict) -> None:
     import json as _json
+    import threading as _threading
     path = _refresh_log_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.{_threading.get_ident()}.tmp"
     with open(tmp, "w") as f:
         _json.dump(log_data, f)
     os.replace(tmp, path)
 
 
-def _read_refresh_log_file() -> dict:
+def read_refresh_log_file() -> dict:
     import json as _json
     try:
         with open(_refresh_log_path()) as f:
@@ -307,40 +323,9 @@ def _read_refresh_log_file() -> dict:
         return {}
 
 
-def mark_refresh_started(trigger: str, lookback_days: int | None = None) -> None:
-    """Record that a rebuild is running so the UI can show it across page reloads.
-
-    Local file only: a process that dies mid-run must not leave a "running"
-    marker in Delta for the next deploy to restore.
-    """
-    from datetime import datetime, timezone
-    try:
-        log_data = _read_refresh_log_file()
-        log_data["in_progress"] = {
-            "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "trigger": trigger,
-            "lookback_days": lookback_days,
-        }
-        _write_refresh_log_file(log_data)
-    except Exception as e:
-        logger.debug("mark_refresh_started (non-fatal): %s", e)
-
-
-def clear_refresh_in_progress() -> None:
-    """Drop a running marker left by a process that died mid-rebuild."""
-    try:
-        log_data = _read_refresh_log_file()
-        if log_data.pop("in_progress", None) is not None:
-            _write_refresh_log_file(log_data)
-    except Exception as e:
-        logger.debug("clear_refresh_in_progress (non-fatal): %s", e)
-
-
 def save_refresh_log_to_delta(log_data: dict) -> None:
     """Persist the MV refresh log. Lakebase primary (app_config KV), UC dual-write."""
     import json as _json
-
-    log_data = {k: v for k, v in log_data.items() if k != "in_progress"}
 
     # Primary: Lakebase app_config KV
     try:
@@ -375,37 +360,41 @@ def append_refresh_history(status: str, trigger: str, *, lookback_days: int | No
     the Rebuild history reflects everything that changed the managed tables — not only
     manual "Rebuild now" and nightly runs.
     """
-    from datetime import datetime, timezone
     try:
-        log_data = _read_refresh_log_file()
-        entry: dict = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "status": status,
-            "duration_seconds": round(duration_seconds, 1),
-            "lookback_days": lookback_days,
-            "trigger": trigger,
-        }
-        if note:
-            entry["note"] = note
-        if error:
-            entry["error"] = error[:200]
-        history = (log_data.get("refresh_history") or []) + [entry]
-        log_data["refresh_history"] = history[-20:]
-        if trigger == "startup":
-            # A completed post-deploy build is a real rebuild: without these the
-            # Settings panel reads "Never rebuilt" and hides the history.
-            log_data.pop("in_progress", None)
-            log_data["last_refresh_utc"] = entry["timestamp"]
-            log_data["status"] = status
-            log_data["duration_seconds"] = entry["duration_seconds"]
-            if error:
-                log_data["error"] = error[:500]
-            else:
-                log_data.pop("error", None)
-        _write_refresh_log_file(log_data)
+        with refresh_log_lock():
+            log_data = read_refresh_log_file()
+            _append_history_entry(log_data, status, trigger, lookback_days=lookback_days,
+                                  duration_seconds=duration_seconds, note=note, error=error)
+            write_refresh_log_file(log_data)
         save_refresh_log_to_delta(log_data)
     except Exception as e:
         logger.debug("append_refresh_history (non-fatal): %s", e)
+
+
+def _append_history_entry(log_data: dict, status: str, trigger: str, *, lookback_days: int | None,
+                          duration_seconds: float, note: str | None, error: str | None) -> None:
+    entry: dict = {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "status": status,
+        "duration_seconds": round(duration_seconds, 1),
+        "lookback_days": lookback_days,
+        "trigger": trigger,
+    }
+    if note:
+        entry["note"] = note
+    if error:
+        entry["error"] = error[:200]
+    log_data["refresh_history"] = ((log_data.get("refresh_history") or []) + [entry])[-20:]
+    if trigger == "startup":
+        # A completed post-deploy build is a real rebuild: without these the
+        # Settings panel reads "Never rebuilt" and hides the history.
+        log_data["last_refresh_utc"] = entry["timestamp"]
+        log_data["status"] = status
+        log_data["duration_seconds"] = entry["duration_seconds"]
+        if error:
+            log_data["error"] = error[:500]
+        else:
+            log_data.pop("error", None)
 
 
 def restore_refresh_log_from_delta() -> None:
@@ -441,7 +430,8 @@ def restore_refresh_log_from_delta() -> None:
 
     if not log_data:
         return
-    _write_refresh_log_file({k: v for k, v in log_data.items() if k != "in_progress"})
+    with refresh_log_lock():
+        write_refresh_log_file(log_data)
     logger.info("Restored refresh log (last_refresh=%s)", log_data.get("last_refresh_utc"))
 
 
@@ -844,15 +834,45 @@ async def get_app_config():
     }
 
 
+def current_refresh_status() -> dict | None:
+    """Last rebuild and any running one, read fresh on every call (never cached)."""
+    from backend.materialized_views import current_rebuild
+
+    log = read_refresh_log_file()
+    running = current_rebuild()
+    if not (log.get("last_refresh_utc") or log.get("refresh_history") or running):
+        return None
+    hours = None
+    try:
+        last = datetime.strptime(log["last_refresh_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        hours = round((datetime.now(timezone.utc) - last).total_seconds() / 3600, 1)
+    except (KeyError, TypeError, ValueError):
+        pass
+    status = {
+        "last_refresh_utc": log.get("last_refresh_utc"),
+        "duration_seconds": log.get("duration_seconds"),
+        "hours_since_refresh": hours,
+        "stale": hours is None or hours > 26,
+        "status": log.get("status", "unknown") if hours is not None else "never",
+        "lookback_days": log.get("lookback_days"),
+        "refresh_history": log.get("refresh_history", []),
+        "in_progress": running,
+    }
+    if log.get("error"):
+        status["error"] = log["error"]
+    return status
+
+
 @router.get("/tables")
 async def get_tables_status(request: Request, no_cache: bool = False):
     """Return status of each MV table: exists, row count, max date, days behind."""
     global _tables_cache, _tables_cache_ts
     if not no_cache and _tables_cache is not None and (time.time() - _tables_cache_ts) < _TABLES_CACHE_TTL:
-        return _tables_cache
+        return {**_tables_cache, "refresh_status": await asyncio.to_thread(current_refresh_status)}
 
     try:
-        return await _get_tables_status_inner(request)
+        result = await _get_tables_status_inner(request)
+        return {**result, "refresh_status": await asyncio.to_thread(current_refresh_status)}
     except Exception as e:
         logger.exception("get_tables_status: unhandled exception")
         return {"catalog": None, "schema": None, "tables": [], "error": str(e), "auth_error": None, "refresh_status": None}
@@ -1049,31 +1069,6 @@ async def _get_tables_status_inner(request: Request):
             "Open the Setup wizard and run the Permissions step to grant the SP access to the required system tables and app catalog."
         )
 
-    # Read MV refresh log (atomic write guarantees no partial read)
-    refresh_status = None
-    _log = _read_refresh_log_file()
-    if _log.get("last_refresh_utc") or _log.get("refresh_history") or _log.get("in_progress"):
-        from datetime import datetime as _dt
-        from datetime import timezone as _tz
-        _hours = None
-        try:
-            _last = _dt.strptime(_log["last_refresh_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
-            _hours = round((_dt.now(_tz.utc) - _last).total_seconds() / 3600, 1)
-        except (KeyError, TypeError, ValueError):
-            pass
-        refresh_status = {
-            "last_refresh_utc": _log.get("last_refresh_utc"),
-            "duration_seconds": _log.get("duration_seconds"),
-            "hours_since_refresh": _hours,
-            "stale": _hours is None or _hours > 26,
-            "status": _log.get("status", "unknown") if _hours is not None else "never",
-            "lookback_days": _log.get("lookback_days"),
-            "refresh_history": _log.get("refresh_history", []),
-            "in_progress": _log.get("in_progress"),
-        }
-        if _log.get("error"):
-            refresh_status["error"] = _log["error"]
-
     # Phase B: Lakebase aggregate-sync watermark. Surfaced SEPARATELY from the
     # Delta build time (refresh_status) above — the two drift independently, so a
     # single freshness number would hide a stalled build behind a fresh sync (§9).
@@ -1087,7 +1082,7 @@ async def _get_tables_status_inner(request: Request):
 
     result = {
         "catalog": catalog, "schema": schema, "tables": results,
-        "auth_error": auth_error, "refresh_status": refresh_status,
+        "auth_error": auth_error,
         "lakebase_sync_status": lakebase_sync_status,
     }
     _tables_cache = result

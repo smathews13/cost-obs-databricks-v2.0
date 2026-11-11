@@ -26,6 +26,10 @@ function ColWarn({ error }: { error: string }) {
 // Module-level — survives tab switches (component unmount/remount)
 let _mvRefreshing = false;
 const TRIGGER_LABEL: Record<string, string> = { manual: "manual", scheduled: "nightly", startup: "post-deploy" };
+
+function latestManualRun(history?: Array<{ timestamp: string; status: string; trigger: string }>) {
+  return [...(history ?? [])].reverse().find((entry) => entry.trigger === "manual") ?? null;
+}
 let _mvPrevRefreshTime: string | null = null;
 let _mvDeadline = 0;
 let _mvPollInterval: ReturnType<typeof setInterval> | null = null;
@@ -61,7 +65,7 @@ export function SettingsConfig() {
       duration_seconds: number | null;
       hours_since_refresh: number | null;
       stale: boolean;
-      in_progress?: { started_utc: string; trigger: string; lookback_days?: number | null } | null;
+      in_progress?: { started_utc: string | null; trigger: string | null } | null;
       status: string;
       lookback_days?: number | null;
       error?: string;
@@ -101,14 +105,13 @@ export function SettingsConfig() {
   _mvPollCallback = async () => {
     noCacheRef.current = true;
     const result = await refetchTables();
-    const newTime = result.data?.refresh_status?.last_refresh_utc;
-    const stillRunning = Boolean(result.data?.refresh_status?.in_progress);
-    if ((newTime && newTime !== _mvPrevRefreshTime && !stillRunning) || Date.now() > _mvDeadline) {
+    const manualRun = latestManualRun(result.data?.refresh_status?.refresh_history);
+    if ((manualRun && manualRun.timestamp !== _mvPrevRefreshTime) || Date.now() > _mvDeadline) {
       if (_mvPollInterval) { clearInterval(_mvPollInterval); _mvPollInterval = null; }
       _mvRefreshing = false;
       setMvRefreshing(false);
       queryClient.setQueryData(["rebuild-in-progress"], false);
-      const status = result.data?.refresh_status?.status ?? null;
+      const status = manualRun && manualRun.timestamp !== _mvPrevRefreshTime ? manualRun.status : null;
       _mvLastResult = status;
       setMvLastResult(status);
       queryClient.invalidateQueries({ queryKey: READINESS_QUERY_KEY });
@@ -125,15 +128,27 @@ export function SettingsConfig() {
 
   async function handleMvRefresh() {
     if (_mvRefreshing) return;
-    _mvPrevRefreshTime = tablesStatus?.refresh_status?.last_refresh_utc ?? null;
     _mvRefreshing = true;
     _mvLastResult = null;
     _mvDeadline = Date.now() + 15 * 60 * 1000;
     setMvRefreshing(true);
     setMvLastResult(null);
     queryClient.setQueryData(["rebuild-in-progress"], true);
+    // The cached status can be 15 minutes old; the server recomputes refresh_status on every call.
+    const fresh = await refetchTables();
+    _mvPrevRefreshTime = latestManualRun(
+      (fresh.data ?? tablesStatus)?.refresh_status?.refresh_history,
+    )?.timestamp ?? null;
     try {
-      await fetch(`/api/settings/refresh-mvs?lookback_days=${lookbackDays}`, { method: "POST" });
+      const resp = await fetch(`/api/settings/refresh-mvs?lookback_days=${lookbackDays}`, { method: "POST" });
+      if (!resp.ok) {
+        _mvRefreshing = false;
+        setMvRefreshing(false);
+        queryClient.setQueryData(["rebuild-in-progress"], false);
+        _mvLastResult = "error";
+        setMvLastResult("error");
+        return;
+      }
     } catch { /* fire-and-forget — server runs refresh in background */ }
     if (_mvPollInterval) clearInterval(_mvPollInterval);
     setTimeout(() => _mvPollCallback?.(), 3_000);
@@ -169,8 +184,10 @@ export function SettingsConfig() {
   const running = rs?.in_progress ?? null;
   const rebuildBusy = mvRefreshing || running != null;
   const fmtStarted = (ts: string) => { try { return new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }); } catch { return ts; } };
+  const runningSince = running?.started_utc ? ` since ${fmtStarted(running.started_utc)}` : "";
+  const runningKind = running?.trigger ? `${TRIGGER_LABEL[running.trigger] ?? running.trigger} ` : "";
   const headerStatus = running
-    ? `Rebuild running since ${fmtStarted(running.started_utc)}`
+    ? `Rebuild running${runningSince}`
     : rs == null || rs.hours_since_refresh == null ? "Never rebuilt"
     : rs.status === "error" ? "Last rebuild failed"
     : rs.stale ? "Stale (>26h)"
@@ -220,7 +237,7 @@ export function SettingsConfig() {
       {rebuildBusy && (
         <div style={{ marginBottom: 12 }}><Callout tone="warning">
           {running
-            ? `A ${TRIGGER_LABEL[running.trigger] ?? running.trigger} rebuild started ${fmtStarted(running.started_utc)} and is still running. Use Check status to see when it finishes.`
+            ? `A ${runningKind}rebuild${running.started_utc ? ` started ${fmtStarted(running.started_utc)}` : ""} is still running. Use Check status to see when it finishes.`
             : "Rebuilding materialized views in the background — this may take a few minutes. The table below updates automatically when complete."}
         </Callout></div>
       )}

@@ -200,3 +200,44 @@ describe("SettingsConfig — rebuild status", () => {
     expect(screen.getByRole("button", { name: /rebuild now/i })).not.toBeDisabled();
   });
 });
+
+describe("SettingsConfig — manual rebuild result", () => {
+  const manual = (timestamp: string, status = "success") => ({
+    timestamp, status, duration_seconds: 60, lookback_days: 180, trigger: "manual",
+  });
+  const withHistory = (...history: object[]) => ({
+    ...HEALTHY_TABLES,
+    refresh_status: { ...HEALTHY_TABLES.refresh_status, refresh_history: history },
+  });
+
+  it("reports a refused rebuild instead of waiting", async () => {
+    renderSettingsConfig(HEALTHY_TABLES);
+    const tablesImpl = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "POST"
+        ? Promise.resolve(new Response("{}", { status: 403 }))
+        : tablesImpl(input, init),
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: /rebuild now/i }));
+
+    expect(await screen.findByText(/rebuild failed/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /rebuild now/i })).not.toBeDisabled();
+  });
+
+  it("waits for its own run, not one that finished after the page loaded", async () => {
+    let tables: object = withHistory(manual("2026-11-10T08:00:00Z"));
+    renderSettingsConfig(tables);
+    fetchMock.mockImplementation((input: RequestInfo | URL) => {
+      const body = String(input).includes("/api/settings/tables") ? tables : {};
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }));
+    });
+    const button = await screen.findByRole("button", { name: /rebuild now/i });
+
+    tables = withHistory(manual("2026-11-10T08:00:00Z"), manual("2026-11-10T09:00:00Z", "error"));
+    await userEvent.click(button);
+    await new Promise((r) => setTimeout(r, 3_500));
+    expect(screen.getByRole("button", { name: /rebuilding/i })).toBeDisabled();
+    expect(screen.queryByText(/rebuild failed/i)).not.toBeInTheDocument();
+  }, 10_000);
+});

@@ -14,6 +14,7 @@ These tables should be refreshed daily via a scheduled job.
 """
 
 import fcntl
+import json
 import logging
 import os
 import tempfile
@@ -21,6 +22,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import date
 
 from backend.db import execute_query, get_catalog_schema
@@ -1518,15 +1520,61 @@ def _busy_message() -> str:
     )
 
 
+_REBUILD_TRIGGER: ContextVar[str] = ContextVar("rebuild_trigger", default="")
+
+
+def set_rebuild_trigger(trigger: str):
+    """Label the rebuild this thread is about to run (shown while it holds the lock)."""
+    return _REBUILD_TRIGGER.set(trigger)
+
+
 def _open_mv_lock_file():
     # Serverless job retries can run as a different OS user than the attempt
     # that created the shared lock file, which leaves it unwritable.
+    # "a+" so a writer waiting its turn doesn't wipe the holder's details.
     try:
-        return open(_MV_LOCK_PATH, "w")
+        return open(_MV_LOCK_PATH, "a+")
     except PermissionError:
         fallback = os.path.join(tempfile.gettempdir(), f"cost-obs-mv-refresh-{os.getuid()}.lock")
         logger.warning("MV lock %s not writable; using %s", _MV_LOCK_PATH, fallback)
-        return open(fallback, "w")
+        return open(fallback, "a+")
+
+
+def _record_lock_holder(lf) -> None:
+    from datetime import datetime, timezone
+    lf.seek(0)
+    lf.truncate()
+    lf.write(json.dumps({
+        "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "trigger": _REBUILD_TRIGGER.get() or None,
+    }))
+    lf.flush()
+
+
+def current_rebuild() -> dict | None:
+    """The rebuild holding the write guard in any worker, or None when idle.
+
+    Reads the lock itself rather than a status file, so it can't go stale when a
+    worker restarts or two runs overlap.
+    """
+    try:
+        lf = _open_mv_lock_file()
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lf.seek(0)
+            try:
+                holder = json.loads(lf.read() or "{}")
+            except ValueError:
+                holder = {}
+            return {"started_utc": holder.get("started_utc"), "trigger": holder.get("trigger")}
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        return None
+    finally:
+        lf.close()
 
 
 # Tables too large to INSERT OVERWRITE on every refresh. dbsql_cost_per_query is
@@ -1640,6 +1688,7 @@ def _mv_write_guard():
                         raise MvRebuildBusyError(_busy_message()) from None
                     time.sleep(_MV_LOCK_POLL_SECONDS)
             try:
+                _record_lock_holder(lf)
                 yield
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)

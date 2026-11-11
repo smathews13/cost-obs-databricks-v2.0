@@ -488,13 +488,26 @@ def setup_materialized_views():
         # single write guard (in-process + cross-worker flock), so every refresh
         # path — startup, nightly, on-demand, wizard — serializes on one lock.
         # (Previously only this startup path locked, so the others raced and
-        # produced duplicate rows.) No separate flock here — that would
-        # double-lock against the internal guard and self-deadlock.
+        # produced duplicate rows.) It also takes the scheduler's lock without
+        # waiting, so the other worker's startup refresh and the scheduler's
+        # missed-run catch-up skip instead of rebuilding again right after.
         def _bg_refresh():
+            import fcntl
+
+            with open(_SCHEDULE_LOCK_PATH, "w") as schedule_lock:
+                try:
+                    fcntl.flock(schedule_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    logger.info("Startup MV refresh SKIPPED — another worker or the scheduler is already rebuilding")
+                    return
+                _refresh_after_deploy()
+
+        def _refresh_after_deploy():
             import time as _time
             _bg_start = _time.monotonic()
-            from backend.routers.settings import append_refresh_history, mark_refresh_started
-            mark_refresh_started("startup")
+            from backend.materialized_views import set_rebuild_trigger
+            from backend.routers.settings import append_refresh_history
+            set_rebuild_trigger("startup")
             try:
                 logger.info("Refreshing materialized views in background (post-deploy, data is stale)...")
                 r = create_materialized_views(catalog, schema)
@@ -567,15 +580,14 @@ def _run_mv_refresh(user_token: str | None = None, lookback_days: int = 180, for
 
     log_dir = os.path.join(os.path.dirname(__file__), "..", ".settings")
     log_path = os.path.join(log_dir, "mv_refresh_log.json")
-    log_tmp = log_path + ".tmp"
 
     refresh_start = time.monotonic()
     start_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # Capture trigger BEFORE force_full may be promoted by window-change detection.
     # A scheduled run that promotes to full due to a window change is still "scheduled".
     trigger = "manual" if force_full else "scheduled"
-    from backend.routers.settings import mark_refresh_started
-    mark_refresh_started(trigger, lookback_days)
+    from backend.materialized_views import set_rebuild_trigger
+    set_rebuild_trigger(trigger)
     results: dict = {}
     log_data: dict = {"last_refresh_utc": start_utc, "duration_seconds": 0, "mv_timings": {}, "status": "error", "error": "unknown"}
     try:
@@ -651,19 +663,18 @@ def _run_mv_refresh(user_token: str | None = None, lookback_days: int = 180, for
             }
             if log_data.get("error"):
                 history_entry["error"] = log_data["error"][:200]
-            prev_history: list = []
-            try:
-                with open(log_path) as _lf:
-                    prev_history = json.load(_lf).get("refresh_history", [])
-            except Exception:
-                pass
-            log_data["refresh_history"] = (prev_history + [history_entry])[-20:]
-            with open(log_tmp, "w") as f:
-                json.dump(log_data, f)
-            os.replace(log_tmp, log_path)
+            from backend.routers.settings import (
+                read_refresh_log_file,
+                refresh_log_lock,
+                save_refresh_log_to_delta,
+                write_refresh_log_file,
+            )
+            with refresh_log_lock():
+                prev_history = read_refresh_log_file().get("refresh_history", [])
+                log_data["refresh_history"] = (prev_history + [history_entry])[-20:]
+                write_refresh_log_file(log_data)
             # Persist to Delta so the log survives redeployments
             try:
-                from backend.routers.settings import save_refresh_log_to_delta
                 save_refresh_log_to_delta(log_data)
             except Exception as delta_exc:
                 logger.warning(f"Could not save refresh log to Delta: {delta_exc}")
@@ -847,12 +858,8 @@ async def lifespan(app: FastAPI):
     # the race against the scheduler's first-iteration catch-up check — causing a
     # spurious "missed rebuild" catch-up on every pod restart/redeploy.
     try:
-        from backend.routers.settings import (
-            clear_refresh_in_progress,
-            restore_refresh_log_from_delta,
-        )
+        from backend.routers.settings import restore_refresh_log_from_delta
         restore_refresh_log_from_delta()
-        clear_refresh_in_progress()
         logger.info("Refresh log restored from Delta (pre-scheduler)")
     except Exception as _rle:
         logger.warning("Pre-scheduler refresh log restore failed (non-fatal): %s", _rle)
