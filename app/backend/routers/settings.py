@@ -283,9 +283,64 @@ def _ensure_refresh_log_table() -> None:
     )
 
 
+def _refresh_log_path() -> str:
+    return os.path.join(os.path.dirname(__file__), "..", "..", ".settings", "mv_refresh_log.json")
+
+
+def _write_refresh_log_file(log_data: dict) -> None:
+    import json as _json
+    path = _refresh_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        _json.dump(log_data, f)
+    os.replace(tmp, path)
+
+
+def _read_refresh_log_file() -> dict:
+    import json as _json
+    try:
+        with open(_refresh_log_path()) as f:
+            data = _json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+def mark_refresh_started(trigger: str, lookback_days: int | None = None) -> None:
+    """Record that a rebuild is running so the UI can show it across page reloads.
+
+    Local file only: a process that dies mid-run must not leave a "running"
+    marker in Delta for the next deploy to restore.
+    """
+    from datetime import datetime, timezone
+    try:
+        log_data = _read_refresh_log_file()
+        log_data["in_progress"] = {
+            "started_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "trigger": trigger,
+            "lookback_days": lookback_days,
+        }
+        _write_refresh_log_file(log_data)
+    except Exception as e:
+        logger.debug("mark_refresh_started (non-fatal): %s", e)
+
+
+def clear_refresh_in_progress() -> None:
+    """Drop a running marker left by a process that died mid-rebuild."""
+    try:
+        log_data = _read_refresh_log_file()
+        if log_data.pop("in_progress", None) is not None:
+            _write_refresh_log_file(log_data)
+    except Exception as e:
+        logger.debug("clear_refresh_in_progress (non-fatal): %s", e)
+
+
 def save_refresh_log_to_delta(log_data: dict) -> None:
     """Persist the MV refresh log. Lakebase primary (app_config KV), UC dual-write."""
     import json as _json
+
+    log_data = {k: v for k, v in log_data.items() if k != "in_progress"}
 
     # Primary: Lakebase app_config KV
     try:
@@ -320,17 +375,9 @@ def append_refresh_history(status: str, trigger: str, *, lookback_days: int | No
     the Rebuild history reflects everything that changed the managed tables — not only
     manual "Rebuild now" and nightly runs.
     """
-    import json as _json
     from datetime import datetime, timezone
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "..", ".settings")
-    log_path = os.path.join(log_dir, "mv_refresh_log.json")
     try:
-        log_data: dict = {}
-        try:
-            with open(log_path) as f:
-                log_data = _json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            log_data = {}
+        log_data = _read_refresh_log_file()
         entry: dict = {
             "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "status": status,
@@ -344,9 +391,18 @@ def append_refresh_history(status: str, trigger: str, *, lookback_days: int | No
             entry["error"] = error[:200]
         history = (log_data.get("refresh_history") or []) + [entry]
         log_data["refresh_history"] = history[-20:]
-        os.makedirs(log_dir, exist_ok=True)
-        with open(log_path, "w") as f:
-            _json.dump(log_data, f)
+        if trigger == "startup":
+            # A completed post-deploy build is a real rebuild: without these the
+            # Settings panel reads "Never rebuilt" and hides the history.
+            log_data.pop("in_progress", None)
+            log_data["last_refresh_utc"] = entry["timestamp"]
+            log_data["status"] = status
+            log_data["duration_seconds"] = entry["duration_seconds"]
+            if error:
+                log_data["error"] = error[:500]
+            else:
+                log_data.pop("error", None)
+        _write_refresh_log_file(log_data)
         save_refresh_log_to_delta(log_data)
     except Exception as e:
         logger.debug("append_refresh_history (non-fatal): %s", e)
@@ -385,11 +441,7 @@ def restore_refresh_log_from_delta() -> None:
 
     if not log_data:
         return
-    log_dir = os.path.join(os.path.dirname(__file__), "..", "..", ".settings")
-    log_path = os.path.join(log_dir, "mv_refresh_log.json")
-    os.makedirs(log_dir, exist_ok=True)
-    with open(log_path, "w") as f:
-        _json.dump(log_data, f)
+    _write_refresh_log_file({k: v for k, v in log_data.items() if k != "in_progress"})
     logger.info("Restored refresh log (last_refresh=%s)", log_data.get("last_refresh_utc"))
 
 
@@ -999,27 +1051,28 @@ async def _get_tables_status_inner(request: Request):
 
     # Read MV refresh log (atomic write guarantees no partial read)
     refresh_status = None
-    _log_path = os.path.join(os.path.dirname(__file__), "..", "..", ".settings", "mv_refresh_log.json")
-    try:
-        with open(_log_path) as _f:
-            _log = json.load(_f)
+    _log = _read_refresh_log_file()
+    if _log.get("last_refresh_utc") or _log.get("refresh_history") or _log.get("in_progress"):
         from datetime import datetime as _dt
         from datetime import timezone as _tz
-        _last = _dt.strptime(_log["last_refresh_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
-        _hours = (_dt.now(_tz.utc) - _last).total_seconds() / 3600
+        _hours = None
+        try:
+            _last = _dt.strptime(_log["last_refresh_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
+            _hours = round((_dt.now(_tz.utc) - _last).total_seconds() / 3600, 1)
+        except (KeyError, TypeError, ValueError):
+            pass
         refresh_status = {
-            "last_refresh_utc": _log["last_refresh_utc"],
+            "last_refresh_utc": _log.get("last_refresh_utc"),
             "duration_seconds": _log.get("duration_seconds"),
-            "hours_since_refresh": round(_hours, 1),
-            "stale": _hours > 26,
-            "status": _log.get("status", "unknown"),
+            "hours_since_refresh": _hours,
+            "stale": _hours is None or _hours > 26,
+            "status": _log.get("status", "unknown") if _hours is not None else "never",
             "lookback_days": _log.get("lookback_days"),
             "refresh_history": _log.get("refresh_history", []),
+            "in_progress": _log.get("in_progress"),
         }
         if _log.get("error"):
             refresh_status["error"] = _log["error"]
-    except (FileNotFoundError, KeyError, ValueError, OSError):
-        pass
 
     # Phase B: Lakebase aggregate-sync watermark. Surfaced SEPARATELY from the
     # Delta build time (refresh_status) above — the two drift independently, so a

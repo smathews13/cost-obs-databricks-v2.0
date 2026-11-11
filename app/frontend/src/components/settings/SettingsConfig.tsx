@@ -25,6 +25,7 @@ function ColWarn({ error }: { error: string }) {
 
 // Module-level — survives tab switches (component unmount/remount)
 let _mvRefreshing = false;
+const TRIGGER_LABEL: Record<string, string> = { manual: "manual", scheduled: "nightly", startup: "post-deploy" };
 let _mvPrevRefreshTime: string | null = null;
 let _mvDeadline = 0;
 let _mvPollInterval: ReturnType<typeof setInterval> | null = null;
@@ -58,8 +59,9 @@ export function SettingsConfig() {
     refresh_status?: {
       last_refresh_utc: string;
       duration_seconds: number | null;
-      hours_since_refresh: number;
+      hours_since_refresh: number | null;
       stale: boolean;
+      in_progress?: { started_utc: string; trigger: string; lookback_days?: number | null } | null;
       status: string;
       lookback_days?: number | null;
       error?: string;
@@ -100,7 +102,8 @@ export function SettingsConfig() {
     noCacheRef.current = true;
     const result = await refetchTables();
     const newTime = result.data?.refresh_status?.last_refresh_utc;
-    if ((newTime && newTime !== _mvPrevRefreshTime) || Date.now() > _mvDeadline) {
+    const stillRunning = Boolean(result.data?.refresh_status?.in_progress);
+    if ((newTime && newTime !== _mvPrevRefreshTime && !stillRunning) || Date.now() > _mvDeadline) {
       if (_mvPollInterval) { clearInterval(_mvPollInterval); _mvPollInterval = null; }
       _mvRefreshing = false;
       setMvRefreshing(false);
@@ -163,6 +166,16 @@ export function SettingsConfig() {
   };
 
   const rs = tablesStatus?.refresh_status;
+  const running = rs?.in_progress ?? null;
+  const rebuildBusy = mvRefreshing || running != null;
+  const fmtStarted = (ts: string) => { try { return new Date(ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }); } catch { return ts; } };
+  const headerStatus = running
+    ? `Rebuild running since ${fmtStarted(running.started_utc)}`
+    : rs == null || rs.hours_since_refresh == null ? "Never rebuilt"
+    : rs.status === "error" ? "Last rebuild failed"
+    : rs.stale ? "Stale (>26h)"
+    : rs.hours_since_refresh < 1 ? "Rebuilt <1h ago"
+    : `Rebuilt ${rs.hours_since_refresh}h ago`;
   // Safety invariant: when a required (non-optional) managed table is already missing,
   // the system is degraded — the drop action is hard-blocked (no break-glass path) so a
   // broken deploy can't be dropped into a worse state. The CONFIRM gate is the second layer.
@@ -180,14 +193,14 @@ export function SettingsConfig() {
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           Managed tables
           <span style={{ fontSize: 12, fontWeight: 400, color: T.textSecondary }}>
-            {rs == null ? "Never rebuilt" : rs.status === "error" ? "Last rebuild failed" : rs.stale ? "Stale (>26h)" : rs.hours_since_refresh < 1 ? "Rebuilt <1h ago" : `Rebuilt ${rs.hours_since_refresh}h ago`}
+            {headerStatus}
           </span>
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
           <Select value={lookbackDays} onChange={(v) => setLookbackDays(Number(v))} disabled={mvRefreshing}
             options={[{ value: 180, label: "6 months" }, { value: 365, label: "1 year" }, { value: 730, label: "2 years" }, { value: 1095, label: "3 years" }]} />
           <SecondaryButton onClick={() => { noCacheRef.current = true; refetchTables(); }} disabled={mvRefreshing || tablesFetching}>Check status</SecondaryButton>
-          <SecondaryButton onClick={handleMvRefresh} disabled={mvRefreshing}>{mvRefreshing ? "Rebuilding…" : "Rebuild now"}</SecondaryButton>
+          <SecondaryButton onClick={handleMvRefresh} disabled={rebuildBusy}>{rebuildBusy ? "Rebuilding…" : "Rebuild now"}</SecondaryButton>
         </span>
       </div>
 
@@ -198,14 +211,18 @@ export function SettingsConfig() {
       {!mvRefreshing && (mvLastResult === "partial_error" || mvLastResult === "error") && (
         <div style={{ marginBottom: 12 }}><Callout tone="danger">Rebuild {mvLastResult === "partial_error" ? "partially failed" : "failed"}. See details below.</Callout></div>
       )}
-      {!mvRefreshing && rs?.status && ["error", "partial_error"].includes(rs.status) && rs.error && (
+      {!rebuildBusy && rs?.status && ["error", "partial_error"].includes(rs.status) && rs.error && (
         <div style={{ marginBottom: 12 }}><Callout tone="danger"><strong>Last rebuild failed.</strong> {rs.error}</Callout></div>
       )}
       {tablesStatus?.auth_error && (
         <div style={{ marginBottom: 12 }}><Callout tone="warning">{tablesStatus.auth_error}</Callout></div>
       )}
-      {mvRefreshing && (
-        <div style={{ marginBottom: 12 }}><Callout tone="warning">Rebuilding materialized views in the background — this may take a few minutes. The table below updates automatically when complete.</Callout></div>
+      {rebuildBusy && (
+        <div style={{ marginBottom: 12 }}><Callout tone="warning">
+          {running
+            ? `A ${TRIGGER_LABEL[running.trigger] ?? running.trigger} rebuild started ${fmtStarted(running.started_utc)} and is still running. Use Check status to see when it finishes.`
+            : "Rebuilding materialized views in the background — this may take a few minutes. The table below updates automatically when complete."}
+        </Callout></div>
       )}
 
       {/* Table */}

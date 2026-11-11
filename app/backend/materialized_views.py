@@ -18,6 +18,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import date
@@ -1499,6 +1500,22 @@ def _update_refresh_state(catalog: str, schema: str, table_name: str, refresh_co
 
 _MV_WRITE_LOCK = threading.Lock()
 _MV_LOCK_PATH = "/tmp/cost-obs-mv-refresh.lock"
+# Longer than the slowest full rebuild seen (3-year window), short enough that a
+# stuck run is reported within the same day.
+_MV_LOCK_WAIT_SECONDS = 3 * 3600
+_MV_LOCK_POLL_SECONDS = 5
+
+
+class MvRebuildBusyError(TimeoutError):
+    """Another rebuild held the write guard for longer than the wait limit."""
+
+
+def _busy_message() -> str:
+    hours = _MV_LOCK_WAIT_SECONDS / 3600
+    return (
+        f"Another rebuild has been running for over {hours:g}h and still holds the rebuild lock. "
+        "Restart the app to clear it, then check the SQL warehouse query history for a stuck statement."
+    )
 
 
 def _open_mv_lock_file():
@@ -1605,18 +1622,31 @@ def _mv_write_guard():
     across the uvicorn workers + nightly scheduler + on-demand + wizard paths
     otherwise race and leave duplicate (usage_date, workspace_id) rows. Blocking
     LOCK_EX means a second writer waits its turn instead of racing; flock
-    auto-releases if the holding process dies.
+    auto-releases if the holding process dies. The wait is bounded so a stuck
+    rebuild surfaces as a failed run instead of blocking every later one.
     """
-    with _MV_WRITE_LOCK:
+    deadline = time.monotonic() + _MV_LOCK_WAIT_SECONDS
+    if not _MV_WRITE_LOCK.acquire(timeout=_MV_LOCK_WAIT_SECONDS):
+        raise MvRebuildBusyError(_busy_message())
+    try:
         lf = _open_mv_lock_file()
         try:
-            fcntl.flock(lf, fcntl.LOCK_EX)
-            yield
-        finally:
+            while True:
+                try:
+                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise MvRebuildBusyError(_busy_message()) from None
+                    time.sleep(_MV_LOCK_POLL_SECONDS)
             try:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+                yield
             finally:
-                lf.close()
+                fcntl.flock(lf, fcntl.LOCK_UN)
+        finally:
+            lf.close()
+    finally:
+        _MV_WRITE_LOCK.release()
 
 
 def _build_errors(results: dict) -> dict[str, str]:

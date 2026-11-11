@@ -167,3 +167,36 @@ describe("SettingsConfig — CONFIRM gate before irreversible drop", () => {
     expect(confirmBtn).toBeDisabled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Rebuild status survives a page reload
+// ---------------------------------------------------------------------------
+
+describe("SettingsConfig — rebuild status", () => {
+  it("shows a running rebuild after a reload and blocks a second one", async () => {
+    renderSettingsConfig({
+      ...HEALTHY_TABLES,
+      refresh_status: {
+        ...HEALTHY_TABLES.refresh_status,
+        in_progress: { started_utc: "2026-11-10T09:00:00Z", trigger: "scheduled" },
+      },
+    });
+
+    expect(await screen.findByText(/rebuild running since/i)).toBeInTheDocument();
+    expect(screen.getByText(/nightly rebuild started/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /rebuilding/i })).toBeDisabled();
+  });
+
+  it("says never rebuilt when only history exists", async () => {
+    renderSettingsConfig({
+      ...HEALTHY_TABLES,
+      refresh_status: {
+        status: "never", stale: true, hours_since_refresh: null, last_refresh_utc: null,
+        refresh_history: [{ timestamp: "2026-11-04T10:00:00Z", status: "config", duration_seconds: 0, lookback_days: null, trigger: "config" }],
+      },
+    });
+
+    expect(await screen.findByText("Never rebuilt")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /rebuild now/i })).not.toBeDisabled();
+  });
+});

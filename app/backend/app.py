@@ -493,6 +493,8 @@ def setup_materialized_views():
         def _bg_refresh():
             import time as _time
             _bg_start = _time.monotonic()
+            from backend.routers.settings import append_refresh_history, mark_refresh_started
+            mark_refresh_started("startup")
             try:
                 logger.info("Refreshing materialized views in background (post-deploy, data is stale)...")
                 r = create_materialized_views(catalog, schema)
@@ -502,7 +504,6 @@ def setup_materialized_views():
                 # manual "Rebuild now" and nightly runs (which go through _run_mv_refresh)
                 # ever appear, and the app's own refreshes look untracked.
                 try:
-                    from backend.routers.settings import append_refresh_history
                     failed = [k for k, v in r.items() if isinstance(v, str) and v.startswith("error")]
                     append_refresh_history(
                         "partial_error" if failed else "success", "startup",
@@ -519,11 +520,22 @@ def setup_materialized_views():
                     logger.warning(f"Cache invalidation after startup refresh failed: {inv_exc}")
             except Exception as ex:
                 logger.warning(f"Background MV refresh failed (non-fatal): {ex}")
+                append_refresh_history(
+                    "error", "startup",
+                    duration_seconds=_time.monotonic() - _bg_start,
+                    error=str(ex),
+                )
         threading.Thread(target=_bg_refresh, daemon=True).start()
         logger.info(f"Materialized views exist — background refresh started (data was {_hours_since:.1f}h stale)")
 
     except Exception as e:
         logger.warning(f"Materialized views startup check failed (non-fatal): {e}")
+
+
+# Picks which worker fires the nightly run. Must differ from the rebuild write
+# guard's file: flock treats two opens of one file independently, so sharing it
+# makes the scheduled rebuild wait on its own lock forever.
+_SCHEDULE_LOCK_PATH = "/tmp/cost-obs-mv-schedule.lock"
 
 
 def _run_mv_refresh(user_token: str | None = None, lookback_days: int = 180, force_full: bool = False) -> dict:
@@ -562,6 +574,8 @@ def _run_mv_refresh(user_token: str | None = None, lookback_days: int = 180, for
     # Capture trigger BEFORE force_full may be promoted by window-change detection.
     # A scheduled run that promotes to full due to a window change is still "scheduled".
     trigger = "manual" if force_full else "scheduled"
+    from backend.routers.settings import mark_refresh_started
+    mark_refresh_started(trigger, lookback_days)
     results: dict = {}
     log_data: dict = {"last_refresh_utc": start_utc, "duration_seconds": 0, "mv_timings": {}, "status": "error", "error": "unknown"}
     try:
@@ -833,8 +847,12 @@ async def lifespan(app: FastAPI):
     # the race against the scheduler's first-iteration catch-up check — causing a
     # spurious "missed rebuild" catch-up on every pod restart/redeploy.
     try:
-        from backend.routers.settings import restore_refresh_log_from_delta
+        from backend.routers.settings import (
+            clear_refresh_in_progress,
+            restore_refresh_log_from_delta,
+        )
         restore_refresh_log_from_delta()
+        clear_refresh_in_progress()
         logger.info("Refresh log restored from Delta (pre-scheduler)")
     except Exception as _rle:
         logger.warning("Pre-scheduler refresh log restore failed (non-fatal): %s", _rle)
@@ -894,7 +912,7 @@ async def lifespan(app: FastAPI):
                             last_dt = _last_rebuild_dt()
                             if last_dt is None or last_dt < scheduled_today:
                                 logger.info(f"Missed scheduled rebuild at {hour_utc:02d}:00 UTC — running catch-up now")
-                                lock_path = "/tmp/cost-obs-mv-refresh.lock"
+                                lock_path = _SCHEDULE_LOCK_PATH
                                 try:
                                     with open(lock_path, "w") as lf:
                                         fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -933,7 +951,7 @@ async def lifespan(app: FastAPI):
                     logger.info(f"Skipping rebuild (frequency={frequency}, weekday={now.weekday()}, day={now.day})")
                     continue
 
-                lock_path = "/tmp/cost-obs-mv-refresh.lock"
+                lock_path = _SCHEDULE_LOCK_PATH
                 try:
                     with open(lock_path, "w") as lf:
                         fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
